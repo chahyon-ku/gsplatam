@@ -1,0 +1,6 @@
+/data
+/experiments
+/wandb
+
+__pycache__
+*.egg-info

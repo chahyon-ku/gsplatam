@@ -16,22 +16,16 @@ pip install --no-deps\
     git+https://github.com/JonathonLuiten/diff-gaussian-rasterization-w-depth.git@cb65e4b86bc3bd8ed42174b72a62e8d3a3a71110\
     git+https://github.com/chahyon-ku/diff-gaussian-rasterization-taming\
     git+https://github.com/nerfstudio-project/gsplat.git
+pip install --no-deps -e\
+    third_party/splatam\
+    .
 ```
 
 ## Evaluate
 ```bash
-bash bash_scripts/download_replica.sh
-bash bash_scripts/download_replicav2.sh
-bash bash_scripts/download_tum.sh
-python scripts/splatam.py configs/replica/splatam.py
-python scripts/splatam.py configs/replica/splatam_s.py
-python scripts/splatam.py configs/replica/splatam_s_short.py
-python scripts/splatam_gsplat.py configs/replica/splatam_s_short.py
-python scripts/splatam_taming.py configs/replica/splatam_s_short.py
-python scripts/splatam_jax.py configs/replica/splatam_s_short.py
-
-python scripts/splatam_jax.py configs/replica/splatam.py
-
-python scripts/splatam.py configs/tum/splatam.py
-python scripts/splatam.py configs/replica_v2/splatam.py
+bash third_party/splatam/SplaTAM/bash_scripts/download_replica.sh
+bash third_party/splatam/SplaTAM/bash_scripts/download_replicav2.sh
+bash third_party/splatam/SplaTAM/bash_scripts/download_tum.sh
+python third_party/splatam/SplaTAM/scripts/splatam.py configs/replica/splatam_s_short.py
+python scripts/gsplat_splatam.py configs/replica/splatam_s_short.py
 ```

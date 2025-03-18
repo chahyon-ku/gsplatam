@@ -1,0 +1,3 @@
+[submodule "third_party/splatam/SplaTAM"]
+	path = third_party/splatam/SplaTAM
+	url = https://github.com/chahyon-ku/SplaTAM.git
