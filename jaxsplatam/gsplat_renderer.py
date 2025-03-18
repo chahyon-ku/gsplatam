@@ -31,27 +31,19 @@ class GsplatRenderer:
 
     def __call__(
         self,
-        means3D,
-        means2D,
+        means,
+        quats,
+        scales,
         opacities,
-        shs = None,
-        colors_precomp = None,
-        scales = None,
-        rotations = None,
-        cov3D_precomp = None,
+        colors,
     ):
-        if colors_precomp is None:
-            raise Exception('Please provide precomputed colors!')
-        
-        if scales is None or rotations is None:
-            raise Exception('Please provide scale and rotation!')
 
-        render_colors, render_alphas, info = rasterization(
-            means=means3D,  # [N, 3]
-            quats=rotations,  # [N, 4]
+        renders, alphas, info = rasterization(
+            means=means,  # [N, 3]
+            quats=quats,  # [N, 4]
             scales=scales,  # [N, 3]
-            opacities=opacities.squeeze(-1),  # [N,]
-            colors=colors_precomp,
+            opacities=opacities,  # [N,]
+            colors=colors,
             render_mode='RGB+ED',
             viewmats=self.camera.viewmats,  # [1, 4, 4]
             Ks=self.camera.Ks,  # [1, 3, 3]
@@ -64,12 +56,12 @@ class GsplatRenderer:
             sh_degree=None,
         )
         # [1, H, W, 3] -> [3, H, W]
-        render_colors = render_colors[0].permute(2, 0, 1)
-        render_alphas = render_alphas[0].permute(2, 0, 1)
+        renders = renders[0].permute(2, 0, 1)
+        alphas = alphas[0].permute(2, 0, 1)
         radii = info["radii"].squeeze(0) # [N,]
         try:
             info["means2d"].retain_grad() # [1, N, 2]
         except:
             pass
 
-        return render_colors[:-1], radii, render_alphas, render_colors[-1:], info["means2d"]
+        return renders[:-1], radii, alphas, renders[-1:], info["means2d"]
