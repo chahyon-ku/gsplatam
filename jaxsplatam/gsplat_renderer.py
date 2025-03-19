@@ -1,5 +1,6 @@
 from dataclasses import dataclass
 from gsplat import rasterization
+import nvtx
 import torch
 
 
@@ -29,6 +30,7 @@ class GsplatRenderer:
     def __init__(self, camera: Camera):
         self.camera = camera
 
+    @nvtx.annotate("GsplatRenderer.__call__")
     def __call__(
         self,
         means,
@@ -36,8 +38,8 @@ class GsplatRenderer:
         scales,
         opacities,
         colors,
+        viewmats,
     ):
-
         renders, alphas, info = rasterization(
             means=means,  # [N, 3]
             quats=quats,  # [N, 4]
@@ -45,7 +47,7 @@ class GsplatRenderer:
             opacities=opacities,  # [N,]
             colors=colors,
             render_mode='RGB+ED',
-            viewmats=self.camera.viewmats,  # [1, 4, 4]
+            viewmats=viewmats,  # [1, 4, 4]
             Ks=self.camera.Ks,  # [1, 3, 3]
             width=self.camera.width,
             height=self.camera.height,

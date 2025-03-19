@@ -15,7 +15,8 @@ pip install --no-deps\
     open3d\
     git+https://github.com/JonathonLuiten/diff-gaussian-rasterization-w-depth.git@cb65e4b86bc3bd8ed42174b72a62e8d3a3a71110\
     git+https://github.com/chahyon-ku/diff-gaussian-rasterization-taming\
-    git+https://github.com/nerfstudio-project/gsplat.git
+    git+https://github.com/nerfstudio-project/gsplat.git\
+    git+https://github.com/MrNeRF/optimized-fused-ssim.git
 pip install --no-deps -e\
     third_party/splatam\
     .
