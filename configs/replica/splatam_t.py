@@ -11,9 +11,9 @@ scene_name = scenes[0]
 
 map_every = 1
 keyframe_every = 5
-mapping_window_size = 32
-tracking_iters = 10
-mapping_iters = 15
+mapping_window_size = 6
+tracking_iters = 4
+mapping_iters = 6
 
 group_name = "Replica"
 run_name = f"{scene_name}_{seed}"
@@ -36,7 +36,7 @@ config = dict(
     checkpoint_time_idx=0,
     save_checkpoints=False, # Save Checkpoints
     checkpoint_interval=100, # Checkpoint Interval
-    use_wandb=True,
+    use_wandb=False,
     wandb=dict(
         entity="chahyon-ku",
         project="SplaTAM",
@@ -56,7 +56,7 @@ config = dict(
         densification_image_height=340,
         densification_image_width=600,
         start=0,
-        end=100,
+        end=-1,
         stride=1,
         num_frames=-1,
     ),

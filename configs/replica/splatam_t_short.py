@@ -12,8 +12,10 @@ scene_name = scenes[0]
 map_every = 1
 keyframe_every = 5
 mapping_window_size = 32
-tracking_iters = 10
-mapping_iters = 15
+# tracking_iters = 10
+# mapping_iters = 15
+tracking_iters = 6
+mapping_iters = 9
 
 group_name = "Replica"
 run_name = f"{scene_name}_{seed}"
@@ -56,7 +58,7 @@ config = dict(
         densification_image_height=340,
         densification_image_width=600,
         start=0,
-        end=-1,
+        end=100,
         stride=1,
         num_frames=-1,
     ),

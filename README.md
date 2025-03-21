@@ -28,5 +28,7 @@ bash third_party/splatam/SplaTAM/bash_scripts/download_replica.sh
 bash third_party/splatam/SplaTAM/bash_scripts/download_replicav2.sh
 bash third_party/splatam/SplaTAM/bash_scripts/download_tum.sh
 python third_party/splatam/SplaTAM/scripts/splatam.py configs/replica/splatam_s_short.py
-python scripts/gsplat_splatam.py configs/replica/splatam_s_short.py
+python scripts/gsplat_splatam.py configs/replica/splatam_s_short.py &> replica_short.log
+python scripts/gsplat_splatam.py configs/replica/splatam_s.py &> replica.log
+python scripts/gsplat_splatam.py configs/tum/splatam.py &> tum.log
 ```

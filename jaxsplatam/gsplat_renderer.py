@@ -60,10 +60,5 @@ class GsplatRenderer:
         # [1, H, W, 3] -> [3, H, W]
         renders = renders[0].permute(2, 0, 1)
         alphas = alphas[0].permute(2, 0, 1)
-        radii = info["radii"].squeeze(0) # [N,]
-        try:
-            info["means2d"].retain_grad() # [1, N, 2]
-        except:
-            pass
 
-        return renders[:-1], radii, alphas, renders[-1:], info["means2d"]
+        return renders[:-1], renders[-1:], alphas

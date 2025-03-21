@@ -186,7 +186,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         rendervar = transformed_params2rendervar(final_params, transformed_gaussians)
 
         # Render Depth & Silhouette
-        im, radius, silhouette, depth, means2d = Renderer(camera=curr_data['cam'])(**rendervar, viewmats=curr_data['cam'].viewmats)
+        im, depth, silhouette = Renderer(camera=curr_data['cam'])(**rendervar, viewmats=curr_data['cam'].viewmats)
         rastered_depth = depth
         # Mask invalid depth in GT
         valid_depth_mask = (curr_data['depth'] > 0)
@@ -265,37 +265,37 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
                                  wandb_run=wandb_run, wandb_step=None, 
                                  wandb_title="Eval/Qual Viz")
 
-    try:
-        # Compute the final ATE RMSE
-        # Get the final camera trajectory
-        num_frames = final_params['cam_unnorm_rots'].shape[-1]
-        latest_est_w2c = first_frame_w2c
-        latest_est_w2c_list = []
+    # try:
+    # Compute the final ATE RMSE
+    # Get the final camera trajectory
+    num_frames = final_params['cam_unnorm_rots'].shape[-1]
+    latest_est_w2c = first_frame_w2c
+    latest_est_w2c_list = []
+    latest_est_w2c_list.append(latest_est_w2c)
+    valid_gt_w2c_list = []
+    valid_gt_w2c_list.append(gt_w2c_list[0])
+    for idx in range(1, num_frames):
+        # Check if gt pose is not nan for this time step
+        if torch.isnan(gt_w2c_list[idx]).sum() > 0:
+            continue
+        interm_cam_rot = F.normalize(final_params['cam_unnorm_rots'][..., idx].detach())
+        interm_cam_trans = final_params['cam_trans'][..., idx].detach()
+        intermrel_w2c = torch.eye(4).cuda().float()
+        intermrel_w2c[:3, :3] = build_rotation(interm_cam_rot)
+        intermrel_w2c[:3, 3] = interm_cam_trans
+        latest_est_w2c = intermrel_w2c
         latest_est_w2c_list.append(latest_est_w2c)
-        valid_gt_w2c_list = []
-        valid_gt_w2c_list.append(gt_w2c_list[0])
-        for idx in range(1, num_frames):
-            # Check if gt pose is not nan for this time step
-            if torch.isnan(gt_w2c_list[idx]).sum() > 0:
-                continue
-            interm_cam_rot = F.normalize(final_params['cam_unnorm_rots'][..., idx].detach())
-            interm_cam_trans = final_params['cam_trans'][..., idx].detach()
-            intermrel_w2c = torch.eye(4).cuda().float()
-            intermrel_w2c[:3, :3] = build_rotation(interm_cam_rot)
-            intermrel_w2c[:3, 3] = interm_cam_trans
-            latest_est_w2c = intermrel_w2c
-            latest_est_w2c_list.append(latest_est_w2c)
-            valid_gt_w2c_list.append(gt_w2c_list[idx])
-        gt_w2c_list = valid_gt_w2c_list
-        # Calculate ATE RMSE
-        ate_rmse = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
-        print("Final Average ATE RMSE: {:.2f} cm".format(ate_rmse*100))
-        if wandb_run is not None:
-            wandb_run.log({"Final Stats/Avg ATE RMSE": ate_rmse,
-                        "Final Stats/step": 1})
-    except:
-        ate_rmse = 100.0
-        print('Failed to evaluate trajectory with alignment.')
+        valid_gt_w2c_list.append(gt_w2c_list[idx])
+    gt_w2c_list = valid_gt_w2c_list
+    # Calculate ATE RMSE
+    ate_rmse = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
+    print("Final Average ATE RMSE: {:.2f} cm".format(ate_rmse*100))
+    if wandb_run is not None:
+        wandb_run.log({"Final Stats/Avg ATE RMSE": ate_rmse,
+                    "Final Stats/step": 1})
+    # except Exception as e:
+    #     ate_rmse = 100.0
+    #     print('Failed to evaluate trajectory with alignment.', e)
     
     # Compute Average Metrics
     psnr_list = np.array(psnr_list)

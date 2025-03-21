@@ -2,6 +2,7 @@
 /experiments
 /wandb
 /*.nsys-rep
+/*.log
 
 __pycache__
 *.egg-info
