@@ -203,6 +203,10 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         gt_w2c_list.append(gt_w2c)
         intrinsics = intrinsics[:3, :3]
 
+        # Process RGB-D Data
+        color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+        depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
+
         if time_idx == 0:
             # Process Camera Parameters
             first_frame_w2c = torch.linalg.inv(pose)
@@ -213,9 +217,6 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         if time_idx != 0 and (time_idx+1) % eval_every != 0:
             continue
 
-        # Process RGB-D Data
-        # color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
-        # depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
 
         # # Get current frame Gaussians
         # transformed_gaussians = transform_to_frame(final_params, time_idx, 
@@ -235,8 +236,6 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         # Mask invalid depth in GT
         valid_depth_mask = (curr_data['depth'] > 0)
         rastered_depth_viz = rastered_depth.detach()
-        print('rastered_depth.shape', rastered_depth.shape)
-        print('valid_depth_mask.shape', valid_depth_mask.shape)
         rastered_depth = rastered_depth * valid_depth_mask
         presence_sil_mask = (silhouette > sil_thres)[0]
         

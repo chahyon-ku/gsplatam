@@ -16,7 +16,7 @@ tracking_iters = 4
 mapping_iters = 6
 
 group_name = "Replica"
-run_name = f"{scene_name}_{seed}"
+run_name = f"tiny_{scene_name}_{seed}"
 
 config = dict(
     workdir=f"./experiments/{group_name}",
