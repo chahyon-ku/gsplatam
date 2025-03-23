@@ -1,4 +1,6 @@
 import os
+from threading import Thread
+from SplaTAM.datasets.gradslam_datasets.geometryutils import relative_transformation
 from SplaTAM.utils.eval_helpers import evaluate_ate, plot_rgbd_silhouette, loss_fn_alex
 from SplaTAM.utils.keyframe_selection import get_pointcloud
 from SplaTAM.utils.slam_external import build_rotation, calc_psnr, inverse_sigmoid, update_params_and_optimizer
@@ -7,11 +9,12 @@ from matplotlib import pyplot as plt
 import numpy as np
 import nvtx
 import torch
+from torch.utils.data import DataLoader
 import torch.nn.functional as F
 from tqdm import tqdm
 from pytorch_msssim import ms_ssim
 from jaxsplatam.gsplat_renderer import setup_camera, GsplatRenderer as Renderer
-from gsplat import world_to_cam
+from gsplat import fully_fused_projection
 import cv2
 
 
@@ -34,6 +37,7 @@ def remove_points(to_remove, params, optimizer):
     return params
 
 
+@nvtx.annotate("prune_gaussians")
 def prune_gaussians(params, variables, optimizer, iter, prune_dict):
     if iter <= prune_dict['stop_after']:
         if (iter >= prune_dict['start_after']) and (iter % prune_dict['prune_every'] == 0):
@@ -48,7 +52,7 @@ def prune_gaussians(params, variables, optimizer, iter, prune_dict):
                 big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
                 to_remove = torch.logical_or(to_remove, big_points_ws)
             params = remove_points(to_remove, params, optimizer)
-            torch.cuda.empty_cache()
+            # torch.cuda.empty_cache()
         
         # Reset Opacities for all Gaussians
         if iter > 0 and iter % prune_dict['reset_opacities_every'] == 0 and prune_dict['reset_opacities']:
@@ -71,6 +75,33 @@ def transformed_params2rendervar(params, transformed_gaussians):
         'scales': torch.exp(log_scales),
         'opacities': torch.sigmoid(params['logit_opacities'][:, 0]),
         'colors': params['rgb_colors'],
+    }
+    return rendervar
+
+
+@nvtx.annotate('get_rendervar')
+def get_rendervar(
+    params, iter_time_idx, gaussians_grad, camera_grad
+):
+    cam_rot = params['cam_unnorm_rots'][iter_time_idx]
+    cam_tran = params['cam_trans'][iter_time_idx]
+    viewmat = build_transform(
+        cam_tran if camera_grad else cam_tran.detach(),
+        cam_rot if camera_grad else cam_rot.detach()
+    )
+
+    if params['log_scales'].shape[1] == 1:
+        log_scales = torch.tile(params['log_scales'], (1, 3))
+    else:
+        log_scales = params['log_scales']
+    # Initialize Render Variables
+    rendervar = {
+        'means': params['means3D'] if gaussians_grad else params['means3D'].detach(),
+        'quats': F.normalize(params['unnorm_rotations'] if gaussians_grad else params['unnorm_rotations'].detach()),
+        'scales': torch.exp(log_scales),
+        'opacities': torch.sigmoid(params['logit_opacities'][:, 0]),
+        'colors': params['rgb_colors'],
+        'viewmats': viewmat[None],
     }
     return rendervar
 
@@ -151,18 +182,26 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         depth_dir = os.path.join(eval_dir, "depth")
         os.makedirs(depth_dir, exist_ok=True)
 
+    
+    dataset.device = 'cpu'
+    dataloader = DataLoader(
+        dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=1,
+    )
+    dataloader_iter = dataloader.__iter__()
+
     gt_w2c_list = []
     for time_idx in tqdm(range(num_frames)):
          # Get RGB-D Data & Camera Parameters
-        color, depth, intrinsics, pose = dataset[time_idx]
-        color, depth, intrinsics, pose = color.cuda(), depth.cuda(), intrinsics.cuda(), pose.cuda()
+        color, depth, intrinsics, pose = next(dataloader_iter)
+        color, depth, intrinsics, pose = color[0].cuda(), depth[0].cuda(), intrinsics[0].cuda(), pose[0].cuda()
+        # color, depth, intrinsics, pose = dataset[time_idx]
+        # color, depth, intrinsics, pose = color.cuda(), depth.cuda(), intrinsics.cuda(), pose.cuda()
         gt_w2c = torch.linalg.inv(pose)
         gt_w2c_list.append(gt_w2c)
         intrinsics = intrinsics[:3, :3]
-
-        # Process RGB-D Data
-        color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
-        depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
 
         if time_idx == 0:
             # Process Camera Parameters
@@ -174,23 +213,30 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         if time_idx != 0 and (time_idx+1) % eval_every != 0:
             continue
 
-        # Get current frame Gaussians
-        transformed_gaussians = transform_to_frame(final_params, time_idx, 
-                                                   gaussians_grad=False, 
-                                                   camera_grad=False)
+        # Process RGB-D Data
+        # color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
+        # depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
+
+        # # Get current frame Gaussians
+        # transformed_gaussians = transform_to_frame(final_params, time_idx, 
+        #                                            gaussians_grad=False, 
+        #                                            camera_grad=False)
  
         # Define current frame data
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
 
-        # Initialize Render Variables
-        rendervar = transformed_params2rendervar(final_params, transformed_gaussians)
+        # # Initialize Render Variables
+        # rendervar = transformed_params2rendervar(final_params, transformed_gaussians)
 
         # Render Depth & Silhouette
-        im, depth, silhouette = Renderer(camera=curr_data['cam'])(**rendervar, viewmats=curr_data['cam'].viewmats)
+        rendervar = get_rendervar(final_params, time_idx, gaussians_grad=False, camera_grad=False)
+        im, depth, silhouette = Renderer(camera=cam)(**rendervar)
         rastered_depth = depth
         # Mask invalid depth in GT
         valid_depth_mask = (curr_data['depth'] > 0)
         rastered_depth_viz = rastered_depth.detach()
+        print('rastered_depth.shape', rastered_depth.shape)
+        print('valid_depth_mask.shape', valid_depth_mask.shape)
         rastered_depth = rastered_depth * valid_depth_mask
         presence_sil_mask = (silhouette > sil_thres)[0]
         
@@ -265,7 +311,6 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
                                  wandb_run=wandb_run, wandb_step=None, 
                                  wandb_title="Eval/Qual Viz")
 
-    # try:
     # Compute the final ATE RMSE
     # Get the final camera trajectory
     num_frames = final_params['cam_unnorm_rots'].shape[-1]
@@ -278,11 +323,10 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         # Check if gt pose is not nan for this time step
         if torch.isnan(gt_w2c_list[idx]).sum() > 0:
             continue
-        interm_cam_rot = F.normalize(final_params['cam_unnorm_rots'][..., idx].detach())
-        interm_cam_trans = final_params['cam_trans'][..., idx].detach()
-        intermrel_w2c = torch.eye(4).cuda().float()
-        intermrel_w2c[:3, :3] = build_rotation(interm_cam_rot)
-        intermrel_w2c[:3, 3] = interm_cam_trans
+        intermrel_w2c = build_transform(
+            final_params['cam_trans'][idx].detach(),
+            final_params['cam_unnorm_rots'][idx].detach()
+        )
         latest_est_w2c = intermrel_w2c
         latest_est_w2c_list.append(latest_est_w2c)
         valid_gt_w2c_list.append(gt_w2c_list[idx])
@@ -293,9 +337,6 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
     if wandb_run is not None:
         wandb_run.log({"Final Stats/Avg ATE RMSE": ate_rmse,
                     "Final Stats/step": 1})
-    # except Exception as e:
-    #     ate_rmse = 100.0
-    #     print('Failed to evaluate trajectory with alignment.', e)
     
     # Compute Average Metrics
     psnr_list = np.array(psnr_list)
@@ -366,26 +407,28 @@ def build_transform(trans, q):
 
 @torch.compile
 def get_percent_inside(pts, est_w2c, intrinsics, width, height):
-    # Transform the 3D pointcloud to the keyframe's camera space
-    pts4 = torch.cat([pts, torch.ones_like(pts[:, :1])], dim=1)
-    transformed_pts = (est_w2c @ pts4.T).T[:, :3]
-    # Project the 3D pointcloud to the keyframe's image space
-    points_2d = torch.matmul(intrinsics, transformed_pts.transpose(0, 1))
-    points_2d = points_2d.transpose(0, 1)
-    points_z = points_2d[:, 2:] + 1e-5
-    points_2d = points_2d / points_z
-    projected_pts = points_2d[:, :2]
-    # Filter out the points that are outside the image
-    edge = 20
-    mask = (projected_pts[:, 0] < width-edge)*(projected_pts[:, 0] > edge) * \
-        (projected_pts[:, 1] < height-edge)*(projected_pts[:, 1] > edge)
-    mask = mask & (points_z[:, 0] > 0)
-    # Compute the percentage of points that are inside the image
-    percent_inside = mask.sum()/projected_pts.shape[0]
+    N = pts.shape[0]
+    C = est_w2c.shape[0]
+    covars = torch.empty((N, 6), device=pts.device, dtype=pts.dtype)
+    camera_ids, *_ = fully_fused_projection(
+        means=pts,
+        covars=covars,
+        quats=None,
+        scales=None,
+        viewmats=est_w2c,
+        Ks=intrinsics,
+        width=width,
+        height=height,
+        packed=True,
+    )
+    percent_inside = torch.bincount(camera_ids, minlength=C) / N
     return percent_inside
 
 
 def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, pixels=1600):
+        if len(keyframe_list) == 0:
+            return []
+        
         # Radomly Sample Pixel Indices from valid depth pixels
         width, height = gt_depth.shape[2], gt_depth.shape[1]
         valid_depth_indices = torch.where(gt_depth[0] > 0)
@@ -396,37 +439,135 @@ def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, pixe
         # Back Project the selected pixels to 3D Pointcloud
         pts = get_pointcloud(gt_depth, intrinsics, w2c, sampled_indices)
 
-        list_keyframe = []
-        for keyframeid, keyframe in enumerate(keyframe_list):
-            percent_inside = get_percent_inside(pts, keyframe['est_w2c'], intrinsics, width, height)
-            # # Get the estimated world2cam of the keyframe
-            # est_w2c = keyframe['est_w2c']
-            # # Transform the 3D pointcloud to the keyframe's camera space
-            # pts4 = torch.cat([pts, torch.ones_like(pts[:, :1])], dim=1)
-            # transformed_pts = (est_w2c @ pts4.T).T[:, :3]
-            # # Project the 3D pointcloud to the keyframe's image space
-            # points_2d = torch.matmul(intrinsics, transformed_pts.transpose(0, 1))
-            # points_2d = points_2d.transpose(0, 1)
-            # points_z = points_2d[:, 2:] + 1e-5
-            # points_2d = points_2d / points_z
-            # projected_pts = points_2d[:, :2]
-            # # Filter out the points that are outside the image
-            # edge = 20
-            # mask = (projected_pts[:, 0] < width-edge)*(projected_pts[:, 0] > edge) * \
-            #     (projected_pts[:, 1] < height-edge)*(projected_pts[:, 1] > edge)
-            # mask = mask & (points_z[:, 0] > 0)
-            # # Compute the percentage of points that are inside the image
-            # percent_inside = mask.sum()/projected_pts.shape[0]
-            list_keyframe.append(
-                {'id': keyframeid, 'percent_inside': percent_inside})
+        viewmats = torch.stack([keyframe['est_w2c'] for keyframe in keyframe_list], dim=0)
+        Ks = intrinsics[None].repeat(viewmats.shape[0], 1, 1)
+        percent_insides = get_percent_inside(pts, viewmats, Ks, width, height)
+        keyframe_list = torch.arange(len(keyframe_list), device=pts.device)
+        keyframe_list = keyframe_list[percent_insides > 0]
+        keyframe_list = keyframe_list[torch.randperm(keyframe_list.shape[0], device=pts.device)][:k]
+        keyframe_list = keyframe_list.cpu().numpy().tolist()
 
-        # Sort the keyframes based on the percentage of points that are inside the image
-        list_keyframe = sorted(
-            list_keyframe, key=lambda i: i['percent_inside'], reverse=True)
-        # Select the keyframes with percentage of points inside the image > 0
-        selected_keyframe_list = [keyframe_dict['id']
-                                  for keyframe_dict in list_keyframe if keyframe_dict['percent_inside'] > 0.0]
-        selected_keyframe_list = list(np.random.permutation(
-            np.array(selected_keyframe_list))[:k])
+        return keyframe_list
 
-        return selected_keyframe_list
+
+def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, every_i=1, qual_every_i=1, 
+                    tracking=False, mapping=False, wandb_run=None, wandb_step=None, wandb_save_qual=False, online_time_idx=None,
+                    global_logging=True):
+    if i % every_i == 0 or i == 1:
+        if wandb_run is not None:
+            if tracking:
+                stage = "Tracking"
+            elif mapping:
+                stage = "Mapping"
+            else:
+                stage = "Current Frame Optimization"
+        if not global_logging:
+            stage = "Per Iteration " + stage
+
+        if tracking:
+            # Get list of gt poses
+            gt_w2c_list = data['iter_gt_w2c_list']
+            valid_gt_w2c_list = []
+            
+            # Get latest trajectory
+            latest_est_w2c = data['w2c']
+            latest_est_w2c_list = []
+            latest_est_w2c_list.append(latest_est_w2c)
+            valid_gt_w2c_list.append(gt_w2c_list[0])
+            for idx in range(1, iter_time_idx+1):
+                # Check if gt pose is not nan for this time step
+                if torch.isnan(gt_w2c_list[idx]).sum() > 0:
+                    continue
+                intermrel_w2c = build_transform(
+                    params['cam_trans'][idx].detach(),
+                    params['cam_unnorm_rots'][idx].detach()
+                )
+                latest_est_w2c = intermrel_w2c
+                latest_est_w2c_list.append(latest_est_w2c)
+                valid_gt_w2c_list.append(gt_w2c_list[idx])
+
+            # Get latest gt pose
+            gt_w2c_list = valid_gt_w2c_list
+            iter_gt_w2c = gt_w2c_list[-1]
+            # Get euclidean distance error between latest and gt pose
+            iter_pt_error = torch.sqrt((latest_est_w2c[0,3] - iter_gt_w2c[0,3])**2 + (latest_est_w2c[1,3] - iter_gt_w2c[1,3])**2 + (latest_est_w2c[2,3] - iter_gt_w2c[2,3])**2)
+            if iter_time_idx > 0:
+                # Calculate relative pose error
+                rel_gt_w2c = relative_transformation(gt_w2c_list[-2], gt_w2c_list[-1])
+                rel_est_w2c = relative_transformation(latest_est_w2c_list[-2], latest_est_w2c_list[-1])
+                rel_pt_error = torch.sqrt((rel_gt_w2c[0,3] - rel_est_w2c[0,3])**2 + (rel_gt_w2c[1,3] - rel_est_w2c[1,3])**2 + (rel_gt_w2c[2,3] - rel_est_w2c[2,3])**2)
+            else:
+                rel_pt_error = torch.zeros(1).float()
+            
+            # Calculate ATE RMSE
+            ate_rmse = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
+            ate_rmse = np.round(ate_rmse, decimals=6)
+            if wandb_run is not None:
+                tracking_log = {f"{stage}/Latest Pose Error":iter_pt_error, 
+                               f"{stage}/Latest Relative Pose Error":rel_pt_error,
+                               f"{stage}/ATE RMSE":ate_rmse}
+
+        # Get current frame Gaussians
+        transformed_gaussians = transform_to_frame(params, iter_time_idx, 
+                                                   gaussians_grad=False,
+                                                   camera_grad=False)
+
+        # Initialize Render Variables
+        rendervar = transformed_params2rendervar(params, transformed_gaussians)
+        im, depth, silhouette = Renderer(camera=data['cam'])(**rendervar, viewmats=data['cam'].viewmats)
+        rastered_depth = depth
+        valid_depth_mask = (data['depth'] > 0)
+        presence_sil_mask = (silhouette > sil_thres)
+
+        im, _, _, = Renderer(camera=data['cam'])(**rendervar, viewmats=data['cam'].viewmats)
+        if tracking:
+            psnr = calc_psnr(im * presence_sil_mask, data['im'] * presence_sil_mask).mean()
+        else:
+            psnr = calc_psnr(im, data['im']).mean()
+
+        if tracking:
+            diff_depth_rmse = torch.sqrt((((rastered_depth - data['depth']) * presence_sil_mask) ** 2))
+            diff_depth_rmse = diff_depth_rmse * valid_depth_mask
+            rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
+            diff_depth_l1 = torch.abs((rastered_depth - data['depth']) * presence_sil_mask)
+            diff_depth_l1 = diff_depth_l1 * valid_depth_mask
+            depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
+        else:
+            diff_depth_rmse = torch.sqrt((((rastered_depth - data['depth'])) ** 2))
+            diff_depth_rmse = diff_depth_rmse * valid_depth_mask
+            rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
+            diff_depth_l1 = torch.abs((rastered_depth - data['depth']))
+            diff_depth_l1 = diff_depth_l1 * valid_depth_mask
+            depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
+
+        if not (tracking or mapping):
+            progress_bar.set_postfix({f"Time-Step: {iter_time_idx} | PSNR: {psnr:.{7}} | Depth RMSE: {rmse:.{7}} | L1": f"{depth_l1:.{7}}"})
+            progress_bar.update(every_i)
+        elif tracking:
+            progress_bar.set_postfix({f"Time-Step: {iter_time_idx} | Rel Pose Error: {rel_pt_error.item():.{7}} | Pose Error: {iter_pt_error.item():.{7}} | ATE RMSE": f"{ate_rmse.item():.{7}}"})
+            progress_bar.update(every_i)
+        elif mapping:
+            progress_bar.set_postfix({f"Time-Step: {online_time_idx} | Frame {data['id']} | PSNR: {psnr:.{7}} | Depth RMSE: {rmse:.{7}} | L1": f"{depth_l1:.{7}}"})
+            progress_bar.update(every_i)
+        
+        if wandb_run is not None:
+            wandb_log = {f"{stage}/PSNR": psnr,
+                         f"{stage}/Depth RMSE": rmse,
+                         f"{stage}/Depth L1": depth_l1,
+                         f"{stage}/step": wandb_step}
+            if tracking:
+                wandb_log = {**wandb_log, **tracking_log}
+            wandb_run.log(wandb_log)
+        
+        if wandb_save_qual and (i % qual_every_i == 0 or i == 1):
+            # Silhouette Mask
+            presence_sil_mask = presence_sil_mask.detach().cpu().numpy()
+
+            # Log plot to wandb
+            if not mapping:
+                fig_title = f"Time-Step: {iter_time_idx} | Iter: {i} | Frame: {data['id']}"
+            else:
+                fig_title = f"Time-Step: {online_time_idx} | Iter: {i} | Frame: {data['id']}"
+            plot_rgbd_silhouette(data['im'], data['depth'], im, rastered_depth, presence_sil_mask, diff_depth_l1,
+                                 psnr, depth_l1, fig_title, wandb_run=wandb_run, wandb_step=wandb_step, 
+                                 wandb_title=f"{stage} Qual Viz")

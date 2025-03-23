@@ -26,16 +26,18 @@ import wandb
 
 from SplaTAM.datasets.gradslam_datasets import load_dataset_config
 from SplaTAM.utils.common_utils import seed_everything, save_params_ckpt, save_params
-from SplaTAM.utils.eval_helpers import report_loss, report_progress
+from SplaTAM.utils.eval_helpers import report_loss
 from SplaTAM.utils.slam_helpers import (
     l1_loss_v1, matrix_to_quaternion
 )
 from SplaTAM.scripts.splatam import get_dataset
 
 from jaxsplatam.gsplat_renderer import GsplatRenderer as Renderer, setup_camera
-from jaxsplatam.utils import prune_gaussians, eval, build_transform, keyframe_selection_overlap
+from jaxsplatam.utils import prune_gaussians, eval, build_transform, keyframe_selection_overlap, report_progress, get_rendervar
 
 
+@nvtx.annotate('get_pointcloud')
+@torch.compile
 def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, 
                    mask=None, compute_mean_sq_dist=False, mean_sq_dist_method="projective"):
     width, height = color.shape[2], color.shape[1]
@@ -171,37 +173,11 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
         return params, variables, intrinsics, w2c, cam, densify_intrinsics, densify_cam
     else:
         return params, variables, intrinsics, w2c, cam
-    
-
-@nvtx.annotate('prepare_rendervar')
-def get_rendervar(
-    params, iter_time_idx, gaussians_grad, camera_grad
-):
-    cam_rot = params['cam_unnorm_rots'][iter_time_idx]
-    cam_tran = params['cam_trans'][iter_time_idx]
-    viewmat = build_transform(
-        cam_tran if camera_grad else cam_tran.detach(),
-        cam_rot if camera_grad else cam_rot.detach()
-    )
-
-    if params['log_scales'].shape[1] == 1:
-        log_scales = torch.tile(params['log_scales'], (1, 3))
-    else:
-        log_scales = params['log_scales']
-    # Initialize Render Variables
-    rendervar = {
-        'means': params['means3D'] if gaussians_grad else params['means3D'].detach(),
-        'quats': F.normalize(params['unnorm_rotations'] if gaussians_grad else params['unnorm_rotations'].detach()),
-        'scales': torch.exp(log_scales),
-        'opacities': torch.sigmoid(params['logit_opacities'][:, 0]),
-        'colors': params['rgb_colors'],
-        'viewmats': viewmat[None],
-    }
-    return rendervar
 
 
-@torch.compile
+# torch.compiler.allow_in_graph(fused_ssim)
 @nvtx.annotate('compute_loss')
+@torch.compile
 def compute_loss(
     im, silhouette, depth, curr_data,
     loss_weights, use_sil_for_loss,
@@ -249,7 +225,7 @@ def compute_loss(
 @nvtx.annotate("scripts.splatam.get_loss")
 def get_loss(params, curr_data, iter_time_idx, loss_weights, use_sil_for_loss,
              sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False, 
-             mapping=False, do_ba=False, plot_dir=None, visualize_tracking_loss=False, tracking_iteration=None):
+             mapping=False, do_ba=False):
 
     rendervar = get_rendervar(params, iter_time_idx, not tracking, tracking or (mapping and do_ba))
 
@@ -294,6 +270,23 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
     return params
 
 
+@nvtx.annotate('get_non_presence_mask')
+@torch.compile
+def get_non_presence_mask(gt_depth, depth, silhouette, sil_thresh):
+    non_presence_sil_mask = (silhouette < sil_thresh)
+    # Check for new foreground objects by using GT depth
+    depth_error = torch.abs(gt_depth - depth) * (gt_depth > 0)
+    non_presence_depth_mask = (depth > gt_depth) * (depth_error > 50*depth_error.median())
+    # Determine non-presence mask
+    non_presence_mask = non_presence_sil_mask | non_presence_depth_mask
+    # Flatten mask
+    non_presence_mask = non_presence_mask.reshape(-1)
+    valid_depth_mask = gt_depth > 0
+    non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
+    return non_presence_mask
+
+
+@nvtx.annotate('add_new_gaussians')
 def add_new_gaussians(params, curr_data, sil_thres, 
                       time_idx, mean_sq_dist_method, gaussian_distribution):
     # Silhouette Rendering
@@ -302,16 +295,7 @@ def add_new_gaussians(params, curr_data, sil_thres,
     # RGB, Depth, and Silhouette Rendering
     im, depth, silhouette = Renderer(camera=curr_data['cam'])(**rendervar)
 
-    non_presence_sil_mask = (silhouette < sil_thres)
-    # Check for new foreground objects by using GT depth
-    gt_depth = curr_data['depth'][0, :, :]
-    render_depth = depth
-    depth_error = torch.abs(gt_depth - render_depth) * (gt_depth > 0)
-    non_presence_depth_mask = (render_depth > gt_depth) * (depth_error > 50*depth_error.median())
-    # Determine non-presence mask
-    non_presence_mask = non_presence_sil_mask | non_presence_depth_mask
-    # Flatten mask
-    non_presence_mask = non_presence_mask.reshape(-1)
+    non_presence_mask = get_non_presence_mask(curr_data['depth'][0], depth, silhouette, sil_thres)
 
     # Get the new frame Gaussians based on the Silhouette
     if torch.sum(non_presence_mask) > 0:
@@ -320,8 +304,6 @@ def add_new_gaussians(params, curr_data, sil_thres,
             params['cam_trans'][time_idx].detach(),
             params['cam_unnorm_rots'][time_idx].detach()
         )
-        valid_depth_mask = (curr_data['depth'][0, :, :] > 0)
-        non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
         new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['intrinsics'], 
                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
                                     mean_sq_dist_method=mean_sq_dist_method)
@@ -367,7 +349,7 @@ def rgbd_slam(config: dict):
     print(f"{config}")
 
     # Create Output Directories
-    output_dir = os.path.join(config["workdir"], config["run_name"] + '_gsplat')
+    output_dir = os.path.join(config["workdir"], 'gsplat_' + config["run_name"])
     eval_dir = os.path.join(output_dir, "eval")
     os.makedirs(eval_dir, exist_ok=True)
     
@@ -573,9 +555,7 @@ def rgbd_slam(config: dict):
                     # Loss for current frame
                     loss, losses = get_loss(params, tracking_curr_data, iter_time_idx, config['tracking']['loss_weights'],
                                                     config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
-                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True, 
-                                                    plot_dir=eval_dir, visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                    tracking_iteration=iter)
+                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True)
                     if config['use_wandb']:
                         # Report Loss
                         wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)
@@ -641,21 +621,15 @@ def rgbd_slam(config: dict):
             tracking_frame_time_count += 1
 
         if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
-            try:
-                # Report Final Tracking Progress
-                progress_bar = tqdm(range(1), desc=f"Tracking Result Time Step: {time_idx}")
-                with torch.no_grad():
-                    if config['use_wandb']:
-                        report_progress(params, tracking_curr_data, 1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True,
-                                        wandb_run=wandb_run, wandb_step=wandb_time_step, wandb_save_qual=config['wandb']['save_qual'], global_logging=True)
-                    else:
-                        report_progress(params, tracking_curr_data, 1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
-                progress_bar.close()
-            except:
-                ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-                save_params_ckpt(params, ckpt_output_dir, time_idx)
-                print('Failed to evaluate trajectory.')
-
+            progress_bar = tqdm(range(1), desc=f"Tracking Result Time Step: {time_idx}")
+            with torch.no_grad():
+                if config['use_wandb']:
+                    report_progress(params, tracking_curr_data, 1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True,
+                                    wandb_run=wandb_run, wandb_step=wandb_time_step, wandb_save_qual=config['wandb']['save_qual'], global_logging=True)
+                else:
+                    report_progress(params, tracking_curr_data, 1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
+            progress_bar.close()
+        
         # Densification & KeyFrame-based Mapping
         if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
             # Densification
@@ -774,22 +748,17 @@ def rgbd_slam(config: dict):
                 mapping_frame_time_count += 1
 
             if time_idx == 0 or (time_idx+1) % config['report_global_progress_every'] == 0:
-                try:
-                    # Report Mapping Progress
-                    progress_bar = tqdm(range(1), desc=f"Mapping Result Time Step: {time_idx}")
-                    with torch.no_grad():
-                        if config['use_wandb']:
-                            report_progress(params, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            wandb_run=wandb_run, wandb_step=wandb_time_step, wandb_save_qual=config['wandb']['save_qual'],
-                                            mapping=True, online_time_idx=time_idx, global_logging=True)
-                        else:
-                            report_progress(params, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
-                                            mapping=True, online_time_idx=time_idx)
-                    progress_bar.close()
-                except:
-                    ckpt_output_dir = os.path.join(config["workdir"], config["run_name"])
-                    save_params_ckpt(params, ckpt_output_dir, time_idx)
-                    print('Failed to evaluate trajectory.')
+                # Report Mapping Progress
+                progress_bar = tqdm(range(1), desc=f"Mapping Result Time Step: {time_idx}")
+                with torch.no_grad():
+                    if config['use_wandb']:
+                        report_progress(params, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
+                                        wandb_run=wandb_run, wandb_step=wandb_time_step, wandb_save_qual=config['wandb']['save_qual'],
+                                        mapping=True, online_time_idx=time_idx, global_logging=True)
+                    else:
+                        report_progress(params, curr_data, 1, progress_bar, time_idx, sil_thres=config['mapping']['sil_thres'], 
+                                        mapping=True, online_time_idx=time_idx)
+                progress_bar.close()
         
         # Add frame to keyframe list
         if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \

@@ -1,3 +1,6 @@
 [submodule "third_party/splatam/SplaTAM"]
 	path = third_party/splatam/SplaTAM
 	url = https://github.com/chahyon-ku/SplaTAM.git
+[submodule "third_party/fused-ssim"]
+	path = third_party/fused-ssim
+	url = https://github.com/rahul-goel/fused-ssim.git

@@ -5,7 +5,7 @@ scenes = ["room0", "room1", "room2",
           "office0", "office1", "office2",
           "office_", "office4"]
 
-primary_device="cuda:0"
+primary_device = "cuda:0"
 seed = 0
 scene_name = scenes[0]
 
@@ -27,7 +27,7 @@ config = dict(
     keyframe_every=keyframe_every, # Keyframe every nth frame
     mapping_window_size=mapping_window_size, # Mapping window size
     report_global_progress_every=500, # Report Global Progress every nth frame
-    eval_every=5, # Evaluate every nth frame (at end of SLAM)
+    eval_every=50, # Evaluate every nth frame (at end of SLAM)
     scene_radius_depth_ratio=3, # Max First Frame Depth to Scene Radius Ratio (For Pruning/Densification)
     mean_sq_dist_method="projective", # ["projective", "knn"] (Type of Mean Squared Distance Calculation for Scale of Gaussians)
     gaussian_distribution="isotropic", # ["isotropic", "anisotropic"] (Isotropic -> Spherical Covariance, Anisotropic -> Ellipsoidal Covariance)
@@ -43,7 +43,8 @@ config = dict(
         group=group_name,
         name=run_name,
         save_qual=False,
-        eval_save_qual=True,
+        # eval_save_qual=True,
+        eval_save_qual=False,
     ),
     data=dict(
         basedir="./data/Replica",

@@ -972,16 +972,16 @@ def rgbd_slam(config: dict):
                        "Final Stats/step": 1})
     
     # Evaluate Final Parameters
-    with torch.no_grad():
-        if config['use_wandb']:
-            eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                 wandb_run=wandb_run, wandb_save_qual=config['wandb']['eval_save_qual'],
-                 mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
-                 eval_every=config['eval_every'])
-        else:
-            eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                 mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
-                 eval_every=config['eval_every'])
+    # with torch.no_grad():
+    #     if config['use_wandb']:
+    #         eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
+    #              wandb_run=wandb_run, wandb_save_qual=config['wandb']['eval_save_qual'],
+    #              mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
+    #              eval_every=config['eval_every'])
+    #     else:
+    #         eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
+    #              mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
+    #              eval_every=config['eval_every'])
 
     # Add Camera Parameters to Save them
     params['timestep'] = variables['timestep']

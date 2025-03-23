@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from gsplat import rasterization
+from gsplat import rasterization, rasterization_2dgs
 import nvtx
 import torch
 
