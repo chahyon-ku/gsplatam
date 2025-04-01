@@ -349,7 +349,7 @@ def rgbd_slam(config: dict):
     print(f"{config}")
 
     # Create Output Directories
-    output_dir = os.path.join(config["workdir"], 'gsplat_' + config["run_name"])
+    output_dir = os.path.join(config["workdir"], 'gsplat-' + config["run_name"])
     eval_dir = os.path.join(output_dir, "eval")
     os.makedirs(eval_dir, exist_ok=True)
     
@@ -496,7 +496,8 @@ def rgbd_slam(config: dict):
     dataloader_iter = dataloader.__iter__()
 
     # Iterate over Scan
-    for time_idx in tqdm(list(range(checkpoint_time_idx, num_frames))):
+    time_idx_tqdm = tqdm(list(range(checkpoint_time_idx, num_frames)))
+    for time_idx in time_idx_tqdm:
         # Load RGBD frames incrementally instead of all frames
         with nvtx.annotate('dataset[time_idx]'):
             # color, depth, _, gt_pose = dataset[time_idx]
@@ -533,6 +534,7 @@ def rgbd_slam(config: dict):
         # Initialize the camera pose for the current frame
         if time_idx > 0:
             params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
+        time_idx_tqdm.set_postfix_str(f'n_gaussians: {params["means3D"].shape[0]}')
 
         # Tracking
         with nvtx.annotate(f'tracking {time_idx}'):

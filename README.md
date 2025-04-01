@@ -1,9 +1,10 @@
 ## Todo
 
-* Generate current logs/profiles
-* Compare not packed vs. packed 
-* Isometric CUDA Kernels
-
+* Generate current logs/profiles (done)
+* Compare not packed vs. packed (done): packed is faster when there are many gaussians?
+* Single-step multi-view mapping
+* Isometric CUDA kernels
+* Taming-cached CUDA kernels
 
 ## Environment
 ```bash
@@ -19,7 +20,8 @@ pip install --no-deps\
     open3d\
     git+https://github.com/JonathonLuiten/diff-gaussian-rasterization-w-depth.git@cb65e4b86bc3bd8ed42174b72a62e8d3a3a71110\
     git+https://github.com/nerfstudio-project/gsplat.git\
-    gplsat
+    git+https://github.com/chahyon-ku/diff-gaussian-rasterization-taming.git\
+    gsplat
 pip install --no-deps -e\
     ./third_party/splatam\
     ./third_party/fused-ssim\
@@ -54,5 +56,12 @@ nsys profile -o gsplat-replica-t python scripts/gsplat_splatam.py configs/replic
 nsys profile -o orig-tum-t python third_party/splatam/SplaTAM/scripts/splatam.py  configs/tum/splatam_t.py &> orig-tum-t.log
 nsys profile -o gsplat-tum-t python scripts/gsplat_splatam.py configs/tum/splatam_t.py &> gsplat-tum-t.log
 nsys profile -o gsplat-tum python scripts/gsplat_splatam.py configs/tum/splatam.py &> gsplat-tum.log
+
 nsys profile -o taming-replica-t python scripts/taming_splatam.py configs/replica/splatam_t.py &> taming-replica-t.log
+nsys profile -o taming-tum-t python scripts/taming_splatam.py configs/tum/splatam_t.py &> taming-tum-t.log
+
+nsys profile -o gsplat_packed-replica-t python scripts/gsplat_splatam.py configs/replica/splatam_t.py &> gsplat_packed-replica-t.log
+nsys profile -o gsplat_packed-tum-t python scripts/gsplat_splatam.py configs/tum/splatam_t.py &> gsplat_packed-tum-t.log
+nsys profile -o gsplat_packed-tum-s python scripts/gsplat_splatam.py configs/tum/splatam_s.py &> gsplat_packed-tum-s.log
+python scripts/gsplat_splatam.py configs/tum/splatam.py &> gsplat_packed-tum.log
 ```

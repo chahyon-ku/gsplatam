@@ -6,4 +6,4 @@
 	url = https://github.com/rahul-goel/fused-ssim.git
 [submodule "third_party/gsplat"]
 	path = third_party/gsplat
-	url = https://github.com/nerfstudio-project/gsplat.git
+	url = https://github.com/nerfstudio-project/gsplat.git@4d3a3b69db4de0326f983ccf7b7b255271a17b01

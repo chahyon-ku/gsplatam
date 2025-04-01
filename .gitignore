@@ -1,9 +1,13 @@
 /data
+/logs
 /experiments
 /wandb
+/third_party
+/build
+/.vscode
 /*.nsys-rep
 /*.log
-/third_party
 
+*.so
 __pycache__
 *.egg-info

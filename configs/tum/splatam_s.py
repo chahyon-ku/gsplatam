@@ -1,9 +1,9 @@
 import os
 from os.path import join as p_join
 
-scenes = ["room0", "room1", "room2",
-          "office0", "office1", "office2",
-          "office_", "office4"]
+
+scenes = ["freiburg1_desk", "freiburg1_desk2", "freiburg1_room", "freiburg2_xyz", "freiburg3_long_office_household"]
+
 
 primary_device = "cuda:0"
 seed = 0
@@ -13,10 +13,10 @@ map_every = 1
 keyframe_every = 5
 mapping_window_size = 6
 tracking_iters = 4
-mapping_iters = 6
+mapping_iters = 12
 
-group_name = "Replica"
-run_name = f"t-{scene_name}_{seed}"
+group_name = "TUM"
+run_name = f"s-{scene_name}_seed{seed}"
 
 config = dict(
     workdir=f"./experiments/{group_name}",
@@ -28,7 +28,7 @@ config = dict(
     mapping_window_size=mapping_window_size, # Mapping window size
     report_global_progress_every=500, # Report Global Progress every nth frame
     eval_every=50, # Evaluate every nth frame (at end of SLAM)
-    scene_radius_depth_ratio=3, # Max First Frame Depth to Scene Radius Ratio (For Pruning/Densification)
+    scene_radius_depth_ratio=2, # Max First Frame Depth to Scene Radius Ratio (For Pruning/Densification)
     mean_sq_dist_method="projective", # ["projective", "knn"] (Type of Mean Squared Distance Calculation for Scale of Gaussians)
     gaussian_distribution="isotropic", # ["isotropic", "anisotropic"] (Isotropic -> Spherical Covariance, Anisotropic -> Ellipsoidal Covariance)
     report_iter_progress=False,
@@ -43,19 +43,14 @@ config = dict(
         group=group_name,
         name=run_name,
         save_qual=False,
-        # eval_save_qual=True,
         eval_save_qual=False,
     ),
     data=dict(
-        basedir="./data/Replica",
-        gradslam_data_cfg="./third_party/splatam/SplaTAM/configs/data/replica.yaml",
-        sequence=scene_name,
-        desired_image_height=680,
-        desired_image_width=1200,
-        tracking_image_height=680,
-        tracking_image_width=1200,
-        densification_image_height=340,
-        densification_image_width=600,
+        basedir="./data/TUM_RGBD",
+        gradslam_data_cfg=f"./third_party/splatam/SplaTAM/configs/data/TUM/{scene_name}.yaml",
+        sequence=f"rgbd_dataset_{scene_name}",
+        desired_image_height=480,
+        desired_image_width=640,
         start=0,
         end=-1,
         stride=1,
@@ -69,6 +64,9 @@ config = dict(
         sil_thres=0.99,
         use_l1=True,
         ignore_outlier_depth_loss=False,
+        use_uncertainty_for_loss_mask=False,
+        use_uncertainty_for_loss=False,
+        use_chamfer=False,
         loss_weights=dict(
             im=0.5,
             depth=1.0,
@@ -79,7 +77,7 @@ config = dict(
             unnorm_rotations=0.0,
             logit_opacities=0.0,
             log_scales=0.0,
-            cam_unnorm_rots=0.0004,
+            cam_unnorm_rots=0.002,
             cam_trans=0.002,
         ),
     ),
@@ -90,6 +88,9 @@ config = dict(
         use_l1=True,
         use_sil_for_loss=False,
         ignore_outlier_depth_loss=False,
+        use_uncertainty_for_loss_mask=False,
+        use_uncertainty_for_loss=False,
+        use_chamfer=False,
         loss_weights=dict(
             im=0.5,
             depth=1.0,
@@ -136,6 +137,6 @@ config = dict(
         viz_near=0.01, viz_far=100.0,
         view_scale=2,
         viz_fps=5, # FPS for Online Recon Viz
-        enter_interactive_post_online=True, # Enter Interactive Mode after Online Recon Viz
+        enter_interactive_post_online=False, # Enter Interactive Mode after Online Recon Viz
     ),
 )

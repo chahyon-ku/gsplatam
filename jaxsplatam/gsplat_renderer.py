@@ -54,7 +54,7 @@ class GsplatRenderer:
             near_plane=self.camera.near_plane,
             far_plane=self.camera.far_plane,
             eps2d=0,
-            packed=False,
+            packed=True,
             sh_degree=None,
         )
         # [1, H, W, 3] -> [3, H, W]

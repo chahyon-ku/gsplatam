@@ -467,7 +467,7 @@ def rgbd_slam(config: dict):
     print(f"{config}")
 
     # Create Output Directories
-    output_dir = os.path.join(config["workdir"], config["run_name"] + '_taming')
+    output_dir = os.path.join(config["workdir"], 'taming-' + config["run_name"])
     eval_dir = os.path.join(output_dir, "eval")
     os.makedirs(eval_dir, exist_ok=True)
     

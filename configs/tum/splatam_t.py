@@ -16,7 +16,7 @@ tracking_iters = 4
 mapping_iters = 6
 
 group_name = "TUM"
-run_name = f"{scene_name}_seed{seed}"
+run_name = f"t-{scene_name}_seed{seed}"
 
 config = dict(
     workdir=f"./experiments/{group_name}",
