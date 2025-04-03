@@ -1,0 +1,25 @@
+use_gt_poses: False
+forward_prop: True
+num_iters: ${tracking_iters}
+use_sil_for_loss: True
+sil_thres: 0.99
+use_l1: True
+ignore_outlier_depth_loss: False
+use_uncertainty_for_loss_mask: False
+use_uncertainty_for_loss: False
+use_chamfer: False
+loss_weights:
+  im: 0.5
+  depth: 1.0
+lrs:
+  means3D: 0.0
+  rgb_colors: 0.0
+  unnorm_rotations: 0.0
+  logit_opacities: 0.0
+  log_scales: 0.0
+  cam_unnorm_rots: 0.002
+  cam_trans: 0.002
+# added
+use_depth_loss_thres: False
+depth_loss_thres: 100000
+visualize_tracking_loss: False

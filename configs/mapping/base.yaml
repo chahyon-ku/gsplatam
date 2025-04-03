@@ -1,0 +1,41 @@
+num_iters: ${mapping_iters}
+add_new_gaussians: True
+sil_thres: 0.5
+use_l1: True
+use_sil_for_loss: False
+ignore_outlier_depth_loss: False
+use_uncertainty_for_loss_mask: False
+use_uncertainty_for_loss: False
+use_chamfer: False
+loss_weights:
+  im: 0.5
+  depth: 1.0
+lrs:
+  means3D: 0.0001
+  rgb_colors: 0.0025
+  unnorm_rotations: 0.001
+  logit_opacities: 0.05
+  log_scales: 0.001
+  cam_unnorm_rots: 0.0000
+  cam_trans: 0.0000
+prune_gaussians: True
+pruning_dict:
+  start_after: 0
+  remove_big_after: 0
+  stop_after: 20
+  prune_every: 20
+  removal_opacity_threshold: 0.005
+  final_removal_opacity_threshold: 0.005
+  reset_opacities: False
+  reset_opacities_every: 500
+use_gaussian_splatting_densification: False
+densify_dict:
+  start_after: 500
+  remove_big_after: 3000
+  stop_after: 5000
+  densify_every: 100
+  grad_thresh: 0.0002
+  num_to_split_into: 2
+  removal_opacity_threshold: 0.005
+  final_removal_opacity_threshold: 0.005
+  reset_opacities_every: 3000

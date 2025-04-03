@@ -1,0 +1,20 @@
+dataset_name: 'TUM'
+scene_name: 'freiburg1_desk'
+scene_radius_depth_ratio: 2
+data:
+  basedir: './data/TUM_RGBD'
+  gradslam_data_cfg: './third_party/splatam/SplaTAM/configs/data/TUM/${scene_name}.yaml'
+  sequence: 'rgbd_dataset_${scene_name}'
+  desired_image_height: 480
+  desired_image_width: 640
+  start: 0
+  end: -1
+  stride: 1
+  num_frames: -1
+  # add default
+  ignore_bad: False
+  use_train_split: True
+  densification_image_height: ${data.desired_image_height}
+  densification_image_width: ${data.desired_image_width}
+  tracking_image_height: ${data.desired_image_height}
+  tracking_image_width: ${data.desired_image_width}

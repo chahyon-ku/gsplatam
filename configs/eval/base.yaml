@@ -1,0 +1,16 @@
+# eval
+report_global_progress_every: 500
+eval_every: 1
+use_wandb: False
+checkpoint_time_idx: 0
+save_checkpoints: False
+checkpoint_interval: 100
+report_iter_progress: False
+
+wandb:
+  entity: 'chahyon-ku'
+  project: 'gsplatam'
+  group: '${dataset_name}'
+  name: '${run_name}'
+  save_qual: False
+  eval_save_qual: False

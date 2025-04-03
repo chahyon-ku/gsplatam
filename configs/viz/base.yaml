@@ -1,0 +1,11 @@
+render_mode: 'color'
+offset_first_viz_cam: True
+show_sil: False
+visualize_cams: True
+viz_w: 600
+viz_h: 340
+viz_near: 0.01
+viz_far: 100.0
+view_scale: 2
+viz_fps: 5
+enter_interactive_post_online: False
