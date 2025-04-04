@@ -40,7 +40,25 @@ class GsplatRenderer:
         colors,
         viewmats,
     ):
-        renders, alphas, info = rasterization(
+        # renders, alphas, info = rasterization(
+        #     means=means,  # [N, 3]
+        #     quats=quats,  # [N, 4]
+        #     scales=scales,  # [N, 3]
+        #     opacities=opacities,  # [N,]
+        #     colors=colors,
+        #     render_mode='RGB+ED',
+        #     viewmats=viewmats,  # [1, 4, 4]
+        #     Ks=self.camera.Ks,  # [1, 3, 3]
+        #     width=self.camera.width,
+        #     height=self.camera.height,
+        #     near_plane=self.camera.near_plane,
+        #     far_plane=self.camera.far_plane,
+        #     eps2d=0,
+        #     packed=True,
+        #     sh_degree=None,
+        # )
+
+        renders, alphas, normals, surf_normals, distort, median_depth, info = rasterization_2dgs(
             means=means,  # [N, 3]
             quats=quats,  # [N, 4]
             scales=scales,  # [N, 3]
@@ -54,9 +72,11 @@ class GsplatRenderer:
             near_plane=self.camera.near_plane,
             far_plane=self.camera.far_plane,
             eps2d=0,
-            packed=True,
+            packed=False,
             sh_degree=None,
+            backgrounds=torch.zeros((viewmats.shape[0], colors.shape[-1]), device=colors.device)
         )
+
         # [1, H, W, 3] -> [3, H, W]
         renders = renders[0].permute(2, 0, 1)
         alphas = alphas[0].permute(2, 0, 1)
