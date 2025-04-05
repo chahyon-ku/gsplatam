@@ -3,3 +3,6 @@ keyframe_every: 5
 mapping_window_size: 15
 tracking_iters: 10
 mapping_iters: 15
+data:
+  densification_image_height: ${eval:'340 if "${dataset_name}" == "Replica" else 480'}
+  densification_image_width: ${eval:'600 if "${dataset_name}" == "Replica" else 640'}

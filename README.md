@@ -2,8 +2,10 @@
 
 * Generate current logs/profiles (done)
 * Compare not packed vs. packed (done): packed is faster when there are many gaussians?
+* Hydra configs (done)
 * Single-step multi-view mapping
-* Isometric CUDA kernels
+* sgd / visible adam / persistent adam
+* Isometric CUDA kernels (unnecessary)
 * Taming-cached CUDA kernels
 
 ## Environment
@@ -49,19 +51,6 @@ python third_party/splatam/SplaTAM/scripts/splatam.py configs/old/replica/splata
 # link error -lcuda
 export LIBRARY_PATH="$CONDA_PREFIX/lib/stubs:$LIBRARY_PATH"
 
-python third_party/splatam/SplaTAM/scripts/splatam.py configs/old/replica/splatam.py &> orig-replica.log
-python scripts/gsplat_splatam.py configs/old/replica/splatam.py &> gsplat-replica.log
-nsys profile -o orig-replica-t python third_party/splatam/SplaTAM/scripts/splatam.py configs/old/replica/splatam_t.py &> orig-replica-t.log
+bash scripts/train_all.sh
 nsys profile -o gsplat-replica-t python scripts/gsplat_splatam.py configs/old/replica/splatam_t.py &> gsplat-replica-t.log
-nsys profile -o orig-tum-t python third_party/splatam/SplaTAM/scripts/splatam.py  configs/old/tum/splatam_t.py &> orig-tum-t.log
-nsys profile -o gsplat-tum-t python scripts/gsplat_splatam.py configs/old/tum/splatam_t.py &> gsplat-tum-t.log
-nsys profile -o gsplat-tum python scripts/gsplat_splatam.py configs/old/tum/splatam.py &> gsplat-tum.log
-
-nsys profile -o taming-replica-t python scripts/taming_splatam.py configs/old/replica/splatam_t.py &> taming-replica-t.log
-nsys profile -o taming-tum-t python scripts/taming_splatam.py configs/old/tum/splatam_t.py &> taming-tum-t.log
-
-nsys profile -o gsplat_packed-replica-t python scripts/gsplat_splatam.py configs/old/replica/splatam_t.py &> gsplat_packed-replica-t.log
-nsys profile -o gsplat_packed-tum-t python scripts/gsplat_splatam.py configs/old/tum/splatam_t.py &> gsplat_packed-tum-t.log
-nsys profile -o gsplat_packed-tum-s python scripts/gsplat_splatam.py configs/old/tum/splatam_s.py &> gsplat_packed-tum-s.log
-python scripts/gsplat_splatam.py configs/old/tum/splatam.py &> gsplat_packed-tum.log
 ```

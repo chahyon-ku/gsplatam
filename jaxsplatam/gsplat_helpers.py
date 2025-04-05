@@ -1,7 +1,7 @@
 import os
 from threading import Thread
 from SplaTAM.datasets.gradslam_datasets.geometryutils import relative_transformation
-from SplaTAM.utils.eval_helpers import evaluate_ate, plot_rgbd_silhouette, loss_fn_alex
+from SplaTAM.utils.eval_helpers import evaluate_ate, loss_fn_alex
 from SplaTAM.utils.keyframe_selection import get_pointcloud
 from SplaTAM.utils.slam_external import build_rotation, calc_psnr, inverse_sigmoid, update_params_and_optimizer
 from SplaTAM.utils.slam_helpers import quat_mult
@@ -162,6 +162,42 @@ def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
     return transformed_gaussians
 
 
+def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_sil_mask, diff_depth_l1,
+                         psnr, depth_l1, fig_title, plot_dir=None, plot_name=None, 
+                         save_plot=False, wandb_run=None, wandb_step=None, wandb_title=None, diff_rgb=None):
+    C, H, W = color.shape
+    rastered_color = torch.clamp(rastered_color, 0, 1)
+    H = H // 2
+    W = W // 2
+
+    max_depth = 6
+    figure = np.zeros((H * 2, W * 3, 3), dtype=np.uint8)
+    figure[:H, :W, :] = color.cpu().permute(1, 2, 0).numpy()[::2, ::2] * 255
+    figure[:H, W:2*W, :] = depth[0, ::2, ::2, None].cpu().numpy() / max_depth * 255
+    figure[:H, 2*W:3*W, :] = presence_sil_mask[::2, ::2, None] * 255
+    figure[H:2*H, :W, :] = rastered_color.cpu().permute(1, 2, 0).numpy()[::2, ::2] * 255
+    figure[H:2*H, W:2*W, :] = rastered_depth[0, ::2, ::2, None].cpu().numpy() / max_depth * 255
+    figure[H:2*H, 2*W:3*W, :] = diff_depth_l1[0, ::2, ::2, None].cpu().numpy() / max_depth * 255
+
+    # write labels with cv2
+    cv2.putText(figure, "Ground Truth RGB", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "Ground Truth Depth", (W + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "Rasterized Silhouette", (2*W + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "Rasterized RGB", (10, H + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "Rasterized Depth", (W + 10, H + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "Diff Depth L1", (2*W + 10, H + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "PSNR: {:.2f}".format(psnr), (10, H + 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "L1: {:.4f}".format(depth_l1), (W + 10, H + 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.imwrite(os.path.join(plot_dir, f"{plot_name}.png"), figure[..., ::-1])
+    
+    if wandb_run is not None:
+        if wandb_step is None:
+            wandb_run.log({wandb_title: figure})
+        else:
+            wandb_run.log({wandb_title: figure}, step=wandb_step)
+
+
+@torch.no_grad()
 def eval(dataset, final_params, num_frames, eval_dir, sil_thres, 
          mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1, save_frames=False):
     print("Evaluating Final Parameters ...")
@@ -181,7 +217,6 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         os.makedirs(rgb_dir, exist_ok=True)
         depth_dir = os.path.join(eval_dir, "depth")
         os.makedirs(depth_dir, exist_ok=True)
-
     
     dataset.device = 'cpu'
     dataloader = DataLoader(
@@ -193,6 +228,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
     dataloader_iter = dataloader.__iter__()
 
     gt_w2c_list = []
+    threads = []
     for time_idx in tqdm(range(num_frames)):
          # Get RGB-D Data & Camera Parameters
         color, depth, intrinsics, pose = next(dataloader_iter)
@@ -216,18 +252,9 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         # Skip frames if not eval_every
         if time_idx != 0 and (time_idx+1) % eval_every != 0:
             continue
-
-
-        # # Get current frame Gaussians
-        # transformed_gaussians = transform_to_frame(final_params, time_idx, 
-        #                                            gaussians_grad=False, 
-        #                                            camera_grad=False)
  
         # Define current frame data
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
-
-        # # Initialize Render Variables
-        # rendervar = transformed_params2rendervar(final_params, transformed_gaussians)
 
         # Render Depth & Silhouette
         rendervar = get_rendervar(final_params, time_idx, gaussians_grad=False, camera_grad=False)
@@ -300,15 +327,21 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         plot_name = "%04d" % time_idx
         presence_sil_mask = presence_sil_mask.detach().cpu().numpy()
         if wandb_run is None:
-            plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
-                                 psnr, depth_l1, fig_title, plot_dir, 
-                                 plot_name=plot_name, save_plot=True)
+            threads.append(Thread(target=plot_rgbd_silhouette,
+                   args=(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
+                         psnr, depth_l1, fig_title, plot_dir, plot_name, True)
+            ))
+            threads[-1].start()
+            # plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
+            #                      psnr, depth_l1, fig_title, plot_dir, 
+            #                      plot_name=plot_name, save_plot=True)
         elif wandb_save_qual:
             plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
                                  psnr, depth_l1, fig_title, plot_dir, 
                                  plot_name=plot_name, save_plot=True,
                                  wandb_run=wandb_run, wandb_step=None, 
                                  wandb_title="Eval/Qual Viz")
+    [t.join() for t in threads]
 
     # Compute the final ATE RMSE
     # Get the final camera trajectory

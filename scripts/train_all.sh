@@ -1,15 +1,15 @@
-
-for backend in orig gsplat
+for backend in gsplat orig
 do
-    for data in tum # tum replica
+    for data in replica tum
     do
-        for size in base #tiny small small2 base tum
+        for size in tiny small base # tiny small small2 base tum
         do
             echo "Training $backend on $data with model size $size"
-            nsys profile -o $backend\_$data\_$size python scripts/train.py backend=$backend\
+            # nsys profile --force-overwrite true -o $backend\_$size-$data\
+            python scripts/train.py backend=$backend\
                 data@_global_=$data\
                 size@_global_=$size\
-                2>&1 | tee $backend\_$data\_$size\.log
+                2>&1 | tee $backend\_$size-$data\.log
         done
     done
 done

@@ -1,6 +1,6 @@
 /data
-/logs
-/experiments
+/logs*
+/experiments*
 /wandb
 /third_party
 /build

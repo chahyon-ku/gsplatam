@@ -47,8 +47,8 @@ class GsplatRenderer:
             opacities=opacities,  # [N,]
             colors=colors,
             render_mode='RGB+ED',
-            viewmats=viewmats,  # [1, 4, 4]
-            Ks=self.camera.Ks,  # [1, 3, 3]
+            viewmats=viewmats,  # [C, 4, 4]
+            Ks=self.camera.Ks,  # [C, 3, 3]
             width=self.camera.width,
             height=self.camera.height,
             near_plane=self.camera.near_plane,
@@ -57,7 +57,7 @@ class GsplatRenderer:
             packed=True,
             sh_degree=None,
         )
-        # [1, H, W, 3] -> [3, H, W]
+        # [C, H, W, 3] -> [3, H, W]
         renders = renders[0].permute(2, 0, 1)
         alphas = alphas[0].permute(2, 0, 1)
 
