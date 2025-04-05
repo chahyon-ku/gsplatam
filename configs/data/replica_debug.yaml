@@ -1,12 +1,12 @@
-dataset_name: 'TUM'
-scene_name: 'freiburg1_desk'
-scene_radius_depth_ratio: 2
+dataset_name: 'Replica'
+scene_name: 'room0'
+scene_radius_depth_ratio: 3
 data:
-  basedir: './data/TUM_RGBD'
-  gradslam_data_cfg: './third_party/splatam/SplaTAM/configs/data/TUM/${scene_name}.yaml'
-  sequence: 'rgbd_dataset_${scene_name}'
-  desired_image_height: 480
-  desired_image_width: 640
+  basedir: './data/Replica'
+  gradslam_data_cfg: './third_party/splatam/SplaTAM/configs/data/replica.yaml'
+  sequence: ${scene_name}
+  desired_image_height: 680
+  desired_image_width: 1200
   start: 0
   end: -1
   stride: 1

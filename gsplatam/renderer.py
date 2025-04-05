@@ -2,6 +2,9 @@ from dataclasses import dataclass
 from gsplat import rasterization, rasterization_2dgs
 import nvtx
 import torch
+import torch.nn.functional as F
+
+from gsplatam.geometry import build_transform
 
 
 @dataclass
@@ -10,27 +13,42 @@ class Camera:
     Ks: torch.Tensor
     width: int
     height: int
-    near_plane: float
-    far_plane: float
+    near_plane: float = 0.01
+    far_plane: float = 100
 
 
-def setup_camera(width, height, K, viewmat, near_plane=0.01, far_plane=100) -> Camera:
-    cam = Camera(
-        viewmats=torch.tensor(viewmat[None]).cuda().float(),
-        Ks=torch.tensor(K[None]).cuda().float(),
-        width=width,
-        height=height,
-        near_plane=near_plane,
-        far_plane=far_plane,
+@nvtx.annotate('get_rendervar')
+def get_rendervar(
+    params, iter_time_idx, gaussians_grad, camera_grad
+):
+    cam_rot = params['cam_unnorm_rots'][iter_time_idx]
+    cam_tran = params['cam_trans'][iter_time_idx]
+    viewmat = build_transform(
+        cam_tran if camera_grad else cam_tran.detach(),
+        cam_rot if camera_grad else cam_rot.detach()
     )
-    return cam
+
+    if params['log_scales'].shape[1] == 1:
+        log_scales = torch.tile(params['log_scales'], (1, 3))
+    else:
+        log_scales = params['log_scales']
+    # Initialize Render Variables
+    rendervar = {
+        'means': params['means3D'] if gaussians_grad else params['means3D'].detach(),
+        'quats': F.normalize(params['unnorm_rotations'] if gaussians_grad else params['unnorm_rotations'].detach()),
+        'scales': torch.exp(log_scales),
+        'opacities': torch.sigmoid(params['logit_opacities'][:, 0]),
+        'colors': params['rgb_colors'],
+        'viewmats': viewmat[None],
+    }
+    return rendervar
 
 
-class GsplatRenderer:
+class Renderer:
     def __init__(self, camera: Camera):
         self.camera = camera
 
-    @nvtx.annotate("GsplatRenderer.__call__")
+    @nvtx.annotate("Renderer.__call__")
     def __call__(
         self,
         means,

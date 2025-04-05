@@ -1,165 +1,19 @@
 import os
 from threading import Thread
 from SplaTAM.datasets.gradslam_datasets.geometryutils import relative_transformation
-from SplaTAM.utils.eval_helpers import evaluate_ate, loss_fn_alex
-from SplaTAM.utils.keyframe_selection import get_pointcloud
-from SplaTAM.utils.slam_external import build_rotation, calc_psnr, inverse_sigmoid, update_params_and_optimizer
-from SplaTAM.utils.slam_helpers import quat_mult
-from matplotlib import pyplot as plt
+import cv2
 import numpy as np
-import nvtx
 import torch
+import matplotlib.pyplot as plt
 from torch.utils.data import DataLoader
-import torch.nn.functional as F
 from tqdm import tqdm
 from pytorch_msssim import ms_ssim
-from jaxsplatam.gsplat_renderer import setup_camera, GsplatRenderer as Renderer
-from gsplat import fully_fused_projection
-import cv2
 
+from SplaTAM.utils.slam_external import calc_psnr
+from SplaTAM.utils.eval_helpers import evaluate_ate, loss_fn_alex
 
-def remove_points(to_remove, params, optimizer):
-    to_keep = ~to_remove
-    keys = [k for k in params.keys() if k not in ['cam_unnorm_rots', 'cam_trans']]
-    for k in keys:
-        group = [g for g in optimizer.param_groups if g['name'] == k][0]
-        stored_state = optimizer.state.get(group['params'][0], None)
-        if stored_state is not None:
-            stored_state["exp_avg"] = stored_state["exp_avg"][to_keep]
-            stored_state["exp_avg_sq"] = stored_state["exp_avg_sq"][to_keep]
-            del optimizer.state[group['params'][0]]
-            group["params"][0] = torch.nn.Parameter((group["params"][0][to_keep].requires_grad_(True)))
-            optimizer.state[group['params'][0]] = stored_state
-            params[k] = group["params"][0]
-        else:
-            group["params"][0] = torch.nn.Parameter(group["params"][0][to_keep].requires_grad_(True))
-            params[k] = group["params"][0]
-    return params
-
-
-@nvtx.annotate("prune_gaussians")
-def prune_gaussians(params, variables, optimizer, iter, prune_dict):
-    if iter <= prune_dict['stop_after']:
-        if (iter >= prune_dict['start_after']) and (iter % prune_dict['prune_every'] == 0):
-            if iter == prune_dict['stop_after']:
-                remove_threshold = prune_dict['final_removal_opacity_threshold']
-            else:
-                remove_threshold = prune_dict['removal_opacity_threshold']
-            # Remove Gaussians with low opacity
-            to_remove = (torch.sigmoid(params['logit_opacities']) < remove_threshold).squeeze()
-            # Remove Gaussians that are too big
-            if iter >= prune_dict['remove_big_after']:
-                big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
-                to_remove = torch.logical_or(to_remove, big_points_ws)
-            params = remove_points(to_remove, params, optimizer)
-            # torch.cuda.empty_cache()
-        
-        # Reset Opacities for all Gaussians
-        if iter > 0 and iter % prune_dict['reset_opacities_every'] == 0 and prune_dict['reset_opacities']:
-            new_params = {'logit_opacities': inverse_sigmoid(torch.ones_like(params['logit_opacities']) * 0.01)}
-            params = update_params_and_optimizer(new_params, params, optimizer)
-    
-    return params
-
-
-def transformed_params2rendervar(params, transformed_gaussians):
-    # Check if Gaussians are Isotropic
-    if params['log_scales'].shape[1] == 1:
-        log_scales = torch.tile(params['log_scales'], (1, 3))
-    else:
-        log_scales = params['log_scales']
-    # Initialize Render Variables
-    rendervar = {
-        'means': transformed_gaussians['means3D'],
-        'quats': F.normalize(transformed_gaussians['unnorm_rotations']),
-        'scales': torch.exp(log_scales),
-        'opacities': torch.sigmoid(params['logit_opacities'][:, 0]),
-        'colors': params['rgb_colors'],
-    }
-    return rendervar
-
-
-@nvtx.annotate('get_rendervar')
-def get_rendervar(
-    params, iter_time_idx, gaussians_grad, camera_grad
-):
-    cam_rot = params['cam_unnorm_rots'][iter_time_idx]
-    cam_tran = params['cam_trans'][iter_time_idx]
-    viewmat = build_transform(
-        cam_tran if camera_grad else cam_tran.detach(),
-        cam_rot if camera_grad else cam_rot.detach()
-    )
-
-    if params['log_scales'].shape[1] == 1:
-        log_scales = torch.tile(params['log_scales'], (1, 3))
-    else:
-        log_scales = params['log_scales']
-    # Initialize Render Variables
-    rendervar = {
-        'means': params['means3D'] if gaussians_grad else params['means3D'].detach(),
-        'quats': F.normalize(params['unnorm_rotations'] if gaussians_grad else params['unnorm_rotations'].detach()),
-        'scales': torch.exp(log_scales),
-        'opacities': torch.sigmoid(params['logit_opacities'][:, 0]),
-        'colors': params['rgb_colors'],
-        'viewmats': viewmat[None],
-    }
-    return rendervar
-
-
-@nvtx.annotate("transform_to_frame")
-def transform_to_frame(params, time_idx, gaussians_grad, camera_grad):
-    """
-    Function to transform Isotropic or Anisotropic Gaussians from world frame to camera frame.
-    
-    Args:
-        params: dict of parameters
-        time_idx: time index to transform to
-        gaussians_grad: enable gradients for Gaussians
-        camera_grad: enable gradients for camera pose
-    
-    Returns:
-        transformed_gaussians: Transformed Gaussians (dict containing means3D & unnorm_rotations)
-    """
-    # Get Frame Camera Pose
-    if camera_grad:
-        cam_rot = F.normalize(params['cam_unnorm_rots'][[time_idx]])
-        cam_tran = params['cam_trans'][[time_idx]]
-    else:
-        cam_rot = F.normalize(params['cam_unnorm_rots'][[time_idx]].detach())
-        cam_tran = params['cam_trans'][[time_idx]].detach()
-    rel_w2c = torch.eye(4).cuda().float()
-    rel_w2c[:3, :3] = build_rotation(cam_rot)
-    rel_w2c[:3, 3] = cam_tran
-
-    # Check if Gaussians need to be rotated (Isotropic or Anisotropic)
-    if params['log_scales'].shape[1] == 1:
-        transform_rots = False # Isotropic Gaussians
-    else:
-        transform_rots = True # Anisotropic Gaussians
-    
-    # Get Centers and Unnorm Rots of Gaussians in World Frame
-    if gaussians_grad:
-        pts = params['means3D']
-        unnorm_rots = params['unnorm_rotations']
-    else:
-        pts = params['means3D'].detach()
-        unnorm_rots = params['unnorm_rotations'].detach()
-    
-    transformed_gaussians = {}
-    # Transform Centers of Gaussians to Camera Frame
-    pts_ones = torch.ones(pts.shape[0], 1).cuda().float()
-    pts4 = torch.cat((pts, pts_ones), dim=1)
-    transformed_pts = (rel_w2c @ pts4.T).T[:, :3]
-    transformed_gaussians['means3D'] = transformed_pts
-    # Transform Rots of Gaussians to Camera Frame
-    if transform_rots:
-        norm_rots = F.normalize(unnorm_rots)
-        transformed_rots = quat_mult(cam_rot, norm_rots)
-        transformed_gaussians['unnorm_rotations'] = transformed_rots
-    else:
-        transformed_gaussians['unnorm_rotations'] = unnorm_rots
-
-    return transformed_gaussians
+from gsplatam.geometry import build_transform
+from gsplatam.renderer import Camera, Renderer, get_rendervar
 
 
 def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_sil_mask, diff_depth_l1,
@@ -247,14 +101,14 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
             # Process Camera Parameters
             first_frame_w2c = torch.linalg.inv(pose)
             # Setup Camera
-            cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.detach().cpu().numpy())
+            cam = Camera(first_frame_w2c[None], intrinsics[None], color.shape[2], color.shape[1])
         
         # Skip frames if not eval_every
         if time_idx != 0 and (time_idx+1) % eval_every != 0:
             continue
  
         # Define current frame data
-        curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'intrinsics': intrinsics, 'w2c': first_frame_w2c}
+        curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'w2c': first_frame_w2c}
 
         # Render Depth & Silhouette
         rendervar = get_rendervar(final_params, time_idx, gaussians_grad=False, camera_grad=False)
@@ -419,69 +273,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
     plt.close()
 
 
-@torch.compile
-def build_transform(trans, q):
-    assert len(trans.shape) == 1 and len(q.shape) == 1
-
-    transform = torch.eye(4, dtype=torch.float32, device='cuda')
-    transform[0, 0] = 1 - 2 * q[2] * q[2] - 2 * q[3] * q[3]
-    transform[0, 1] = 2 * q[1] * q[2] - 2 * q[0] * q[3]
-    transform[0, 2] = 2 * q[1] * q[3] + 2 * q[0] * q[2]
-    transform[1, 0] = 2 * q[1] * q[2] + 2 * q[0] * q[3]
-    transform[1, 1] = 1 - 2 * q[1] * q[1] - 2 * q[3] * q[3]
-    transform[1, 2] = 2 * q[2] * q[3] - 2 * q[0] * q[1]
-    transform[2, 0] = 2 * q[1] * q[3] - 2 * q[0] * q[2]
-    transform[2, 1] = 2 * q[2] * q[3] + 2 * q[0] * q[1]
-    transform[2, 2] = 1 - 2 * q[1] * q[1] - 2 * q[2] * q[2]
-    transform[:3, 3] = trans
-    return transform
-
-
-@torch.compile
-def get_percent_inside(pts, est_w2c, intrinsics, width, height):
-    N = pts.shape[0]
-    C = est_w2c.shape[0]
-    covars = torch.empty((N, 6), device=pts.device, dtype=pts.dtype)
-    camera_ids, *_ = fully_fused_projection(
-        means=pts,
-        covars=covars,
-        quats=None,
-        scales=None,
-        viewmats=est_w2c,
-        Ks=intrinsics,
-        width=width,
-        height=height,
-        packed=True,
-    )
-    percent_inside = torch.bincount(camera_ids, minlength=C) / N
-    return percent_inside
-
-
-def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, pixels=1600):
-        if len(keyframe_list) == 0:
-            return []
-        
-        # Radomly Sample Pixel Indices from valid depth pixels
-        width, height = gt_depth.shape[2], gt_depth.shape[1]
-        valid_depth_indices = torch.where(gt_depth[0] > 0)
-        valid_depth_indices = torch.stack(valid_depth_indices, dim=1)
-        indices = torch.randint(valid_depth_indices.shape[0], (pixels,))
-        sampled_indices = valid_depth_indices[indices]
-
-        # Back Project the selected pixels to 3D Pointcloud
-        pts = get_pointcloud(gt_depth, intrinsics, w2c, sampled_indices)
-
-        viewmats = torch.stack([keyframe['est_w2c'] for keyframe in keyframe_list], dim=0)
-        Ks = intrinsics[None].repeat(viewmats.shape[0], 1, 1)
-        percent_insides = get_percent_inside(pts, viewmats, Ks, width, height)
-        keyframe_list = torch.arange(len(keyframe_list), device=pts.device)
-        keyframe_list = keyframe_list[percent_insides > 0]
-        keyframe_list = keyframe_list[torch.randperm(keyframe_list.shape[0], device=pts.device)][:k]
-        keyframe_list = keyframe_list.cpu().numpy().tolist()
-
-        return keyframe_list
-
-
+@torch.no_grad()
 def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, every_i=1, qual_every_i=1, 
                     tracking=False, mapping=False, wandb_run=None, wandb_step=None, wandb_save_qual=False, online_time_idx=None,
                     global_logging=True):
@@ -539,19 +331,12 @@ def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, eve
                                f"{stage}/Latest Relative Pose Error":rel_pt_error,
                                f"{stage}/ATE RMSE":ate_rmse}
 
-        # Get current frame Gaussians
-        transformed_gaussians = transform_to_frame(params, iter_time_idx, 
-                                                   gaussians_grad=False,
-                                                   camera_grad=False)
-
-        # Initialize Render Variables
-        rendervar = transformed_params2rendervar(params, transformed_gaussians)
-        im, depth, silhouette = Renderer(camera=data['cam'])(**rendervar, viewmats=data['cam'].viewmats)
+        rendervar = get_rendervar(params, iter_time_idx, gaussians_grad=False, camera_grad=False)
+        im, depth, silhouette = Renderer(camera=data['cam'])(**rendervar)
         rastered_depth = depth
         valid_depth_mask = (data['depth'] > 0)
         presence_sil_mask = (silhouette > sil_thres)
 
-        im, _, _, = Renderer(camera=data['cam'])(**rendervar, viewmats=data['cam'].viewmats)
         if tracking:
             psnr = calc_psnr(im * presence_sil_mask, data['im'] * presence_sil_mask).mean()
         else:

@@ -6,3 +6,7 @@ mapping_iters: 6
 data:
   densification_image_height: ${eval:'340 if "${dataset_name}" == "Replica" else 480'}
   densification_image_width: ${eval:'600 if "${dataset_name}" == "Replica" else 640'}
+
+tracking_factor: 1
+mapping_factor: 1
+densify_factor: 2
