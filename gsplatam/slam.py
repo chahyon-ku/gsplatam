@@ -75,13 +75,12 @@ def initialize_camera_pose(params, curr_time_idx, forward_prop):
     return params
 
 
-def tracking_step(config, params, time_idx, tracking_data, curr_gt_w2c):
+def tracking_step(config, params, optimizer, time_idx, tracking_data, curr_gt_w2c):
     tracking_iter_time_sum = 0
     tracking_iter_time_count = 0
     tracking_start_time = time.time()
     if time_idx > 0 and not config['tracking']['use_gt_poses']:
         # Reset Optimizer & Learning Rates for tracking
-        optimizer = initialize_optimizer(params, config['tracking']['lrs'], tracking=True)
         # Keep Track of Best Candidate Rotation & Translation
         candidate_cam_unnorm_rot = params['cam_unnorm_rots'][[time_idx]].detach().clone()
         candidate_cam_tran = params['cam_trans'][[time_idx]].detach().clone()
@@ -141,19 +140,6 @@ def tracking_step(config, params, time_idx, tracking_data, curr_gt_w2c):
     return tracking_iter_time_sum, tracking_iter_time_count, tracking_end_time - tracking_start_time, 1
 
 
-def densification_step(config, params, time_idx, densify_data):
-    # Add new Gaussians to the scene based on the Silhouette
-    params = add_new_gaussians(
-        params,
-        densify_data, 
-        config['mapping']['sil_thres'],
-        time_idx,
-        config['mean_sq_dist_method'],
-        config['gaussian_distribution']
-    )
-    return params
-
-
 def mapping_step(config, params, time_idx, keyframe_list):
     pass
 
@@ -174,17 +160,6 @@ def rgbd_slam(config: dict):
     output_dir = os.path.join(config['workdir'], config['run_name'])
     eval_dir = os.path.join(output_dir, 'eval')
     os.makedirs(eval_dir, exist_ok=True)
-    
-    # Init WandB
-    if config['use_wandb']:
-        wandb_time_step = 0
-        wandb_tracking_step = 0
-        wandb_mapping_step = 0
-        wandb_run = wandb.init(project=config['wandb']['project'],
-                               entity=config['wandb']['entity'],
-                               group=config['wandb']['group'],
-                               name=config['wandb']['name'],
-                               config=config)
 
     # Get Device
     device = torch.device(config['primary_device'])
@@ -261,6 +236,8 @@ def rgbd_slam(config: dict):
     dataloader_iter = dataloader.__iter__()
 
     # Iterate over Scan
+    tracking_optimizer = initialize_optimizer(params, config['tracking']['lrs'], tracking=True)
+    mapping_optimizer = initialize_optimizer(params, config['mapping']['lrs'], tracking=False)
     time_idx_tqdm = tqdm(list(range(checkpoint_time_idx, num_frames)))
     for time_idx in time_idx_tqdm:
         # Load RGBD frames incrementally instead of all frames
@@ -277,16 +254,11 @@ def rgbd_slam(config: dict):
         depth = depth.permute(2, 0, 1)
         gt_w2c_all_frames.append(gt_w2c)
         curr_gt_w2c = gt_w2c_all_frames
-        # Optimize only current time step for tracking
-        iter_time_idx = time_idx
-        
-        # Optimization Iterations
-        num_iters_mapping = config['mapping']['num_iters']
         
         # Initialize the camera pose for the current frame
         if time_idx > 0:
             params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
-        time_idx_tqdm.set_postfix_str(f'n_gaussians: {params['means3D'].shape[0]}')
+        time_idx_tqdm.set_postfix_str(f'num_gaussians: {params['means3D'].shape[0]}')
 
         # Tracking
         with nvtx.annotate(f'tracking {time_idx}'):
@@ -294,11 +266,14 @@ def rgbd_slam(config: dict):
                 'cam': tracking_cam,
                 'im': color[:, ::config['tracking_factor'], ::config['tracking_factor']],
                 'depth': depth[:, ::config['tracking_factor'], ::config['tracking_factor']], 
-                'id': iter_time_idx,# 'intrinsics': tracking_intrinsics,
+                'id': time_idx,# 'intrinsics': tracking_intrinsics,
                 'w2c': first_frame_w2c,
                 'iter_gt_w2c_list': curr_gt_w2c
             }
-            metrics = tracking_step(config, params, time_idx, tracking_data, curr_gt_w2c)
+            tracking_optimizer = initialize_optimizer(params, config['tracking']['lrs'], tracking=True)
+            # for param_group in optimizer.param_groups:
+            #     param_group['lr'] = config['tracking']['lrs'][param_group['name']]
+            metrics = tracking_step(config, params, tracking_optimizer, time_idx, tracking_data, curr_gt_w2c)
             tracking_iter_time_sum += metrics[0]
             tracking_iter_time_count += metrics[1]
             tracking_frame_time_sum += metrics[2]
@@ -317,7 +292,17 @@ def rgbd_slam(config: dict):
                         'w2c': first_frame_w2c,
                         'iter_gt_w2c_list': curr_gt_w2c
                     }
-                    params = densification_step(config, params, time_idx, densify_data)
+                    # input(f'before densify: {params['means3D'].shape[0]}')
+                    params, mapping_optimizer = add_new_gaussians(
+                        params,
+                        mapping_optimizer,
+                        densify_data, 
+                        config['mapping']['sil_thres'],
+                        time_idx,
+                        config['mean_sq_dist_method'],
+                        config['gaussian_distribution']
+                    )
+                    # input(f'after densify: {params['means3D'].shape[0]}')
             
             with nvtx.annotate(f'keyframe_mapping {time_idx}'):
                 with torch.no_grad():
@@ -337,19 +322,17 @@ def rgbd_slam(config: dict):
                     # Add current frame to the selected keyframes
                     selected_time_idx.append(time_idx)
                     selected_keyframes.append(-1)
-                    # Print the selected keyframes
-                    # print(f'\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}')
-
-            # Reset Optimizer & Learning Rates for Full Map Optimization
-            with nvtx.annotate('initialize_optimizer'):
-                optimizer = initialize_optimizer(params, config['mapping']['lrs'], tracking=False) 
 
             # Mapping
             with nvtx.annotate(f'mapping {time_idx}'):
                 mapping_start_time = time.time()
-                if num_iters_mapping > 0 and config['report_iter_progress']:
-                    progress_bar = tqdm(range(num_iters_mapping), desc=f'Mapping Time Step: {time_idx}')
-                for iter in range(num_iters_mapping):
+                # if optimizer is None:
+                # optimizer = initialize_optimizer(params, config['mapping']['lrs'], tracking=False)
+                
+                for param_group in mapping_optimizer.param_groups:
+                    param_group['lr'] = config['mapping']['lrs'][param_group['name']]
+                
+                for iter in range(config['mapping']['num_iters']):
                     iter_start_time = time.time()
                     # Randomly select a frame until current time step amongst keyframes
                     rand_idx = np.random.randint(0, len(selected_keyframes))
@@ -377,29 +360,21 @@ def rgbd_slam(config: dict):
                     loss, losses = get_loss(params, iter_data, iter_time_idx, config['mapping']['loss_weights'],
                                                     config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
                                                     config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True)
-                    if config['use_wandb']:
-                        # Report Loss
-                        wandb_mapping_step = report_loss(losses, wandb_run, wandb_mapping_step, mapping=True)
                     # Backprop
                     with nvtx.annotate(f'backprop'):
                         loss.backward()
                     with torch.no_grad():
                         # Prune Gaussians
                         if config['mapping']['prune_gaussians']:
-                            params = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
-                            if config['use_wandb']:
-                                wandb_run.log({'Mapping/Number of Gaussians - Pruning': params['means3D'].shape[0],
-                                            'Mapping/step': wandb_mapping_step})
+                            params = prune_gaussians(params, variables, mapping_optimizer, iter, config['mapping']['pruning_dict'])
                         # Optimizer Update
                         with nvtx.annotate(f'optimizer step'):
-                            optimizer.step()
-                        optimizer.zero_grad(set_to_none=True)
+                            mapping_optimizer.step()
+                        mapping_optimizer.zero_grad(set_to_none=True)
                     # Update the runtime numbers
                     iter_end_time = time.time()
                     mapping_iter_time_sum += iter_end_time - iter_start_time
                     mapping_iter_time_count += 1
-                if num_iters_mapping > 0 and config['report_iter_progress']:
-                    progress_bar.close()
                 # Update the runtime numbers
                 mapping_end_time = time.time()
                 mapping_frame_time_sum += mapping_end_time - mapping_start_time
@@ -425,12 +400,6 @@ def rgbd_slam(config: dict):
             ckpt_output_dir = os.path.join(config['workdir'], config['run_name'])
             save_params_ckpt(params, ckpt_output_dir, time_idx)
             np.save(os.path.join(ckpt_output_dir, f'keyframe_time_indices{time_idx}.npy'), np.array(keyframe_time_indices))
-        
-        # Increment WandB Time Step
-        if config['use_wandb']:
-            wandb_time_step += 1
-
-        # torch.cuda.empty_cache()
 
     # Compute Average Runtimes
     if tracking_iter_time_count == 0:
@@ -447,24 +416,12 @@ def rgbd_slam(config: dict):
     print(f'Average Tracking/Frame Time: {tracking_frame_time_avg} s')
     print(f'Average Mapping/Iteration Time: {mapping_iter_time_avg*1000} ms')
     print(f'Average Mapping/Frame Time: {mapping_frame_time_avg} s')
-    if config['use_wandb']:
-        wandb_run.log({'Final Stats/Average Tracking Iteration Time (ms)': tracking_iter_time_avg*1000,
-                       'Final Stats/Average Tracking Frame Time (s)': tracking_frame_time_avg,
-                       'Final Stats/Average Mapping Iteration Time (ms)': mapping_iter_time_avg*1000,
-                       'Final Stats/Average Mapping Frame Time (s)': mapping_frame_time_avg,
-                       'Final Stats/step': 1})
-    
+
     # Evaluate Final Parameters
     with torch.no_grad():
-        if config['use_wandb']:
-            eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                 wandb_run=wandb_run, wandb_save_qual=config['wandb']['eval_save_qual'],
-                 mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
-                 eval_every=config['eval_every'])
-        else:
-            eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
-                 mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
-                 eval_every=config['eval_every'])
+        eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
+             mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
+             eval_every=config['eval_every'])
 
     # Add Camera Parameters to Save them
     params['timestep'] = time_idx
@@ -480,7 +437,3 @@ def rgbd_slam(config: dict):
     
     # Save Parameters
     save_params(params, output_dir)
-
-    # Close WandB Run
-    if config['use_wandb']:
-        wandb.finish()

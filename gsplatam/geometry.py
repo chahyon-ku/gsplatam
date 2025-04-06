@@ -34,9 +34,11 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
     FY = intrinsics[1, 1]
 
     # Compute indices of pixels
-    x_grid, y_grid = torch.meshgrid(torch.arange(width).cuda().float(), 
-                                    torch.arange(height).cuda().float(),
-                                    indexing='xy')
+    x_grid, y_grid = torch.meshgrid(
+        torch.arange(width, dtype=torch.float32, device='cuda'), 
+        torch.arange(height, dtype=torch.float32, device='cuda'),
+        indexing='xy'
+    )
     xx = (x_grid - CX)/FX
     yy = (y_grid - CY)/FY
     xx = xx.reshape(-1)
@@ -46,7 +48,7 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
     # Initialize point cloud
     pts_cam = torch.stack((xx * depth_z, yy * depth_z, depth_z), dim=-1)
     if transform_pts:
-        pix_ones = torch.ones(height * width, 1).cuda().float()
+        pix_ones = torch.ones(height * width, 1, dtype=torch.float32, device='cuda')
         pts4 = torch.cat((pts_cam, pix_ones), dim=1)
         c2w = torch.inverse(w2c)
         pts = (c2w @ pts4.T).T[:, :3]

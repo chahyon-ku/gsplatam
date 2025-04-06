@@ -3,7 +3,7 @@ import nvtx
 import torch
 
 from fused_ssim import fused_ssim
-from SplaTAM.utils.slam_external import inverse_sigmoid, update_params_and_optimizer
+from SplaTAM.utils.slam_external import cat_params_to_optimizer, inverse_sigmoid, update_params_and_optimizer
 from SplaTAM.utils.slam_helpers import l1_loss_v1
 from SplaTAM.utils.keyframe_selection import get_pointcloud as get_keyframe_pointcloud
 
@@ -45,7 +45,6 @@ def prune_gaussians(params, variables, optimizer, iter, prune_dict):
                 big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
                 to_remove = torch.logical_or(to_remove, big_points_ws)
             params = remove_points(to_remove, params, optimizer)
-            # torch.cuda.empty_cache()
         
         # Reset Opacities for all Gaussians
         if iter > 0 and iter % prune_dict['reset_opacities_every'] == 0 and prune_dict['reset_opacities']:
@@ -69,6 +68,7 @@ def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, pixe
     # Back Project the selected pixels to 3D Pointcloud
     with nvtx.annotate('get_keyframe_pointcloud'):
         pts = get_keyframe_pointcloud(gt_depth, intrinsics, w2c, sampled_indices)
+        # pts = get_pointcloud(gt_depth, intrinsics, w2c, sampled_indices)
 
     viewmats = torch.stack([keyframe['est_w2c'] for keyframe in keyframe_list], dim=0)
     Ks = intrinsics[None].repeat(viewmats.shape[0], 1, 1)
@@ -100,10 +100,15 @@ def get_non_presence_mask(gt_depth, depth, silhouette, sil_thresh):
 
 @nvtx.annotate('add_new_gaussians')
 @torch.no_grad()
-def add_new_gaussians(params, curr_data, sil_thres, 
-                      time_idx, mean_sq_dist_method, gaussian_distribution):
-    # Silhouette Rendering
-
+def add_new_gaussians(
+    params, 
+    optimizer,
+    curr_data,
+    sil_thres, 
+    time_idx,
+    mean_sq_dist_method,
+    gaussian_distribution
+):
     # RGB, Depth, and Silhouette Rendering
     rendervar = get_rendervar(params, time_idx, False, False)
     im, depth, silhouette = Renderer(camera=curr_data['cam'])(**rendervar)
@@ -111,7 +116,7 @@ def add_new_gaussians(params, curr_data, sil_thres,
     non_presence_mask = get_non_presence_mask(curr_data['depth'][0], depth, silhouette, sil_thres)
 
     # Get the new frame Gaussians based on the Silhouette
-    if torch.sum(non_presence_mask) > 0:
+    if torch.any(non_presence_mask):
         # Get the new pointcloud in the world frame
         curr_w2c = build_transform(
             params['cam_trans'][time_idx].detach(),
@@ -121,10 +126,11 @@ def add_new_gaussians(params, curr_data, sil_thres,
                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
                                     mean_sq_dist_method=mean_sq_dist_method)
         new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution)
-        for k, v in new_params.items():
-            params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
+        # for k, v in new_params.items():
+        #     params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
+        params = cat_params_to_optimizer(new_params, params, optimizer)
 
-    return params
+    return params, optimizer
 
 
 def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribution):
