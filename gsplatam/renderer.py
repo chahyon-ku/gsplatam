@@ -21,8 +21,13 @@ class Camera:
 def get_rendervar(
     params, iter_time_idx, gaussians_grad, camera_grad
 ):
-    cam_rot = params['cam_unnorm_rots'][iter_time_idx]
-    cam_tran = params['cam_trans'][iter_time_idx]
+    if iter_time_idx == -1:
+        cam_rot = params['cam_unnorm_rot']
+        cam_tran = params['cam_tran']
+    else:
+        cam_rot = params['cam_unnorm_rots'][iter_time_idx]
+        cam_tran = params['cam_trans'][iter_time_idx]
+
     viewmat = build_transform(
         cam_tran if camera_grad else cam_tran.detach(),
         cam_rot if camera_grad else cam_rot.detach()

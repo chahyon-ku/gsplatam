@@ -92,7 +92,7 @@ def tracking_step(config, params, optimizer, time_idx, tracking_data, curr_gt_w2
         while True:
             iter_start_time = time.time()
             # Loss for current frame
-            loss, losses = get_loss(params, tracking_data, time_idx, config['tracking']['loss_weights'],
+            loss, losses = get_loss(params, tracking_data, -1, config['tracking']['loss_weights'],
                                             config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
                                             config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True)
             # Backprop
@@ -104,8 +104,10 @@ def tracking_step(config, params, optimizer, time_idx, tracking_data, curr_gt_w2
                 # Save the best candidate rotation & translation
                 if loss < current_min_loss:
                     current_min_loss = loss
-                    candidate_cam_unnorm_rot = params['cam_unnorm_rots'][[time_idx]].detach().clone()
-                    candidate_cam_tran = params['cam_trans'][[time_idx]].detach().clone()
+                    # candidate_cam_unnorm_rot = params['cam_unnorm_rots'][[time_idx]].detach().clone()
+                    # candidate_cam_tran = params['cam_trans'][[time_idx]].detach().clone()
+                    candidate_cam_unnorm_rot = params['cam_unnorm_rot'].detach().clone()
+                    candidate_cam_tran = params['cam_tran'].detach().clone()
             # Update the runtime numbers
             iter_end_time = time.time()
             tracking_iter_time_sum += iter_end_time - iter_start_time
@@ -236,8 +238,23 @@ def rgbd_slam(config: dict):
     dataloader_iter = dataloader.__iter__()
 
     # Iterate over Scan
-    tracking_optimizer = initialize_optimizer(params, config['tracking']['lrs'], tracking=True)
-    mapping_optimizer = initialize_optimizer(params, config['mapping']['lrs'], tracking=False)
+    tracking_optimizer = torch.optim.Adam([
+        {
+            'name': 'cam_unnorm_rot',
+            'params': params['cam_unnorm_rot'],
+            'lr': config['tracking']['lrs']['cam_unnorm_rots'],
+        },
+        {
+            'name': 'cam_tran',
+            'params': params['cam_tran'],
+            'lr': config['tracking']['lrs']['cam_trans'],
+        }
+    ], eps=1e-15)
+    mapping_optimizer = initialize_optimizer(
+        {k: v for k, v in params.items() if k not in ['cam_unnorm_rots', 'cam_trans', 'cam_unnorm_rot', 'cam_tran']},
+        config['mapping']['lrs'],
+        tracking=False
+    )
     time_idx_tqdm = tqdm(list(range(checkpoint_time_idx, num_frames)))
     for time_idx in time_idx_tqdm:
         # Load RGBD frames incrementally instead of all frames
@@ -255,9 +272,6 @@ def rgbd_slam(config: dict):
         gt_w2c_all_frames.append(gt_w2c)
         curr_gt_w2c = gt_w2c_all_frames
         
-        # Initialize the camera pose for the current frame
-        if time_idx > 0:
-            params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
         time_idx_tqdm.set_postfix_str(f'num_gaussians: {params['means3D'].shape[0]}')
 
         # Tracking
@@ -270,9 +284,9 @@ def rgbd_slam(config: dict):
                 'w2c': first_frame_w2c,
                 'iter_gt_w2c_list': curr_gt_w2c
             }
-            tracking_optimizer = initialize_optimizer(params, config['tracking']['lrs'], tracking=True)
-            # for param_group in optimizer.param_groups:
-            #     param_group['lr'] = config['tracking']['lrs'][param_group['name']]
+            # Initialize the camera pose for the current frame
+            # if time_idx > 0:
+            #     params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
             metrics = tracking_step(config, params, tracking_optimizer, time_idx, tracking_data, curr_gt_w2c)
             tracking_iter_time_sum += metrics[0]
             tracking_iter_time_count += metrics[1]
@@ -326,12 +340,6 @@ def rgbd_slam(config: dict):
             # Mapping
             with nvtx.annotate(f'mapping {time_idx}'):
                 mapping_start_time = time.time()
-                # if optimizer is None:
-                # optimizer = initialize_optimizer(params, config['mapping']['lrs'], tracking=False)
-                
-                for param_group in mapping_optimizer.param_groups:
-                    param_group['lr'] = config['mapping']['lrs'][param_group['name']]
-                
                 for iter in range(config['mapping']['num_iters']):
                     iter_start_time = time.time()
                     # Randomly select a frame until current time step amongst keyframes

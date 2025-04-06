@@ -13,7 +13,7 @@ from gsplatam.renderer import Renderer, get_rendervar
 
 def remove_points(to_remove, params, optimizer):
     to_keep = ~to_remove
-    keys = [k for k in params.keys() if k not in ['cam_unnorm_rots', 'cam_trans']]
+    keys = [k for k in params.keys() if k not in ['cam_unnorm_rots', 'cam_trans', 'cam_unnorm_rot', 'cam_tran']]
     for k in keys:
         group = [g for g in optimizer.param_groups if g['name'] == k][0]
         stored_state = optimizer.state.get(group['params'][0], None)
@@ -148,13 +148,15 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
     cam_trans = np.zeros((num_frames, 3))
 
     params = {
-        'means3D': init_pt_cld[:, :3],      # [num_pts, 3]
-        'rgb_colors': init_pt_cld[:, 3:],   # [num_pts, 3]
-        'unnorm_rotations': unnorm_rots,    # [num_pts, 4]
-        'logit_opacities': logit_opacities, # [num_pts,]
-        'log_scales': log_scales,           # [num_pts, 1]
-        'cam_unnorm_rots': cam_unnorm_rots, # [num_frames, 4]
-        'cam_trans': cam_trans              # [num_frames, 3]
+        'means3D': init_pt_cld[:, :3],        # [num_pts, 3]
+        'rgb_colors': init_pt_cld[:, 3:],     # [num_pts, 3]
+        'unnorm_rotations': unnorm_rots,      # [num_pts, 4]
+        'logit_opacities': logit_opacities,   # [num_pts,]
+        'log_scales': log_scales,             # [num_pts, 1]
+        'cam_unnorm_rots': cam_unnorm_rots,   # [num_frames, 4]
+        'cam_trans': cam_trans,               # [num_frames, 3]
+        'cam_unnorm_rot': cam_unnorm_rots[0], # [4]
+        'cam_tran': cam_trans[0],             # [3]
     }
 
     for k, v in params.items():

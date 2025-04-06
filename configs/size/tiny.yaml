@@ -9,4 +9,4 @@ data:
 
 tracking_factor: 1
 mapping_factor: 1
-densify_factor: 2
+densify_factor: ${eval:'2 if "${dataset_name}" == "Replica" else 1'}

@@ -1,12 +1,14 @@
 ## Todo
 
 * Generate current logs/profiles (done)
-* Compare not packed vs. packed (done): packed is faster when there are many gaussians?
+* Compare not packed vs. packed (done): packed is faster when there are more gaussians contrary to documentation
 * Hydra configs (done)
 * Single-step multi-view mapping
 * sgd / visible adam / persistent adam
-* Isometric CUDA kernels (unnecessary)
-* Taming-cached CUDA kernels
+    * separate out tracking and mapping  optimizers
+* Isometric CUDA kernels (dropped)
+* Taming-cached CUDA kernels (dropped)
+* Entropy-based keyframe selection based on Joey Wilson's paper
 
 ## Environment
 ```bash
