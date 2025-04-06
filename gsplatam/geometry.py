@@ -1,6 +1,8 @@
 import nvtx
 import torch
 
+from gsplat.cuda._wrapper import fully_fused_projection
+
 
 @torch.compile
 def build_transform(trans, q):
@@ -25,11 +27,11 @@ def build_transform(trans, q):
 @torch.compile
 def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, 
                    mask=None, compute_mean_sq_dist=False, mean_sq_dist_method="projective"):
-    width, height = color.shape[2], color.shape[1]
-    CX = intrinsics[0][2]
-    CY = intrinsics[1][2]
-    FX = intrinsics[0][0]
-    FY = intrinsics[1][1]
+    width, height = depth.shape[2], depth.shape[1]
+    CX = intrinsics[0, 2]
+    CY = intrinsics[1, 2]
+    FX = intrinsics[0, 0]
+    FY = intrinsics[1, 1]
 
     # Compute indices of pixels
     x_grid, y_grid = torch.meshgrid(torch.arange(width).cuda().float(), 
@@ -61,8 +63,9 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
             raise ValueError(f"Unknown mean_sq_dist_method {mean_sq_dist_method}")
     
     # Colorize point cloud
-    cols = torch.permute(color, (1, 2, 0)).reshape(-1, 3) # (C, H, W) -> (H, W, C) -> (H * W, C)
-    point_cld = torch.cat((pts, cols), -1)
+    if color is not None:
+        color = torch.permute(color, (1, 2, 0)).reshape(-1, 3) # (C, H, W) -> (H, W, C) -> (H * W, C)
+        point_cld = torch.cat((pts, color), -1)
 
     # Select points based on mask
     if mask is not None:
@@ -74,3 +77,23 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
         return point_cld, mean3_sq_dist
     else:
         return point_cld
+
+
+@torch.compile
+def get_percent_inside(pts, est_w2c, intrinsics, width, height):
+    N = pts.shape[0]
+    C = est_w2c.shape[0]
+    covars = torch.empty((N, 6), device=pts.device, dtype=pts.dtype)
+    camera_ids, *_ = fully_fused_projection(
+        means=pts,
+        covars=covars,
+        quats=None,
+        scales=None,
+        viewmats=est_w2c,
+        Ks=intrinsics,
+        width=width,
+        height=height,
+        packed=True,
+    )
+    percent_inside = torch.bincount(camera_ids, minlength=C) / N
+    return percent_inside

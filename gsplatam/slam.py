@@ -8,56 +8,16 @@ import numpy as np
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from fused_ssim import fused_ssim
 from SplaTAM.utils.common_utils import save_params_ckpt, save_params
 from SplaTAM.utils.eval_helpers import report_loss
-from SplaTAM.utils.slam_helpers import l1_loss_v1, matrix_to_quaternion
+from SplaTAM.utils.slam_helpers import matrix_to_quaternion
 from SplaTAM.scripts.splatam import get_dataset
 from SplaTAM.datasets.gradslam_datasets import load_dataset_config
 
 from gsplatam.eval import eval
-from gsplatam.gs import prune_gaussians, keyframe_selection_overlap
-from gsplatam.renderer import Camera, Renderer, get_rendervar
 from gsplatam.geometry import build_transform, get_pointcloud
-
-
-def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribution):
-    num_pts = init_pt_cld.shape[0]
-    mean3_sq_dist = mean3_sq_dist.cpu()
-    unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1))
-    logit_opacities = np.zeros((num_pts, 1))
-    if gaussian_distribution == 'isotropic':
-        log_scales = np.tile(np.log(np.sqrt(mean3_sq_dist))[..., None], (1, 1))
-    elif gaussian_distribution == 'anisotropic':
-        log_scales = np.tile(np.log(np.sqrt(mean3_sq_dist))[..., None], (1, 3))
-    else:
-        raise ValueError(f'Unknown gaussian_distribution {gaussian_distribution}')
-    cam_unnorm_rots = np.tile([1, 0, 0, 0], (num_frames, 1))
-    cam_trans = np.zeros((num_frames, 3))
-
-    params = {
-        'means3D': init_pt_cld[:, :3],      # [num_pts, 3]
-        'rgb_colors': init_pt_cld[:, 3:],   # [num_pts, 3]
-        'unnorm_rotations': unnorm_rots,    # [num_pts, 4]
-        'logit_opacities': logit_opacities, # [num_pts,]
-        'log_scales': log_scales,           # [num_pts, 1]
-        'cam_unnorm_rots': cam_unnorm_rots, # [num_frames, 4]
-        'cam_trans': cam_trans              # [num_frames, 3]
-    }
-
-    for k, v in params.items():
-        params[k] = torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True))
-
-    return params
-
-
-def initialize_optimizer(params, lrs_dict, tracking):
-    lrs = lrs_dict
-    param_groups = [{'params': [v], 'name': k, 'lr': lrs[k]} for k, v in params.items()]
-    if tracking:
-        return torch.optim.Adam(param_groups)
-    else:
-        return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
+from gsplatam.gs import add_new_gaussians, get_loss, initialize_optimizer, initialize_params, prune_gaussians, keyframe_selection_overlap
+from gsplatam.renderer import Camera
 
 
 def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio, 
@@ -74,7 +34,7 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
     w2c = torch.linalg.inv(pose)
 
     # Setup Camera
-    cam = Camera(w2c[None], intrinsics[None], color.shape[2], color.shape[1])
+    cam = Camera(intrinsics[None], color.shape[2], color.shape[1])
 
     # Get Initial Point Cloud (PyTorch CUDA Tensor)
     color = color[:, ::densify_factor, ::densify_factor]
@@ -90,148 +50,7 @@ def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio,
 
     variables = {'scene_radius': torch.max(depth) / scene_radius_depth_ratio}
 
-    return params, variables, cam
-
-
-# torch.compiler.allow_in_graph(fused_ssim)
-@nvtx.annotate('compute_loss')
-@torch.compile
-def compute_loss(
-    im, silhouette, depth, curr_data,
-    loss_weights, use_sil_for_loss,
-    sil_thres, use_l1, ignore_outlier_depth_loss,
-    tracking
-):
-    # Mask with valid depth values (accounts for outlier depth values)
-    nan_mask = depth > 0
-    if ignore_outlier_depth_loss:
-        depth_error = torch.abs(curr_data['depth'] - depth) * (curr_data['depth'] > 0)
-        mask = (depth_error < 10*depth_error.median())
-        mask = mask & (curr_data['depth'] > 0)
-    else:
-        mask = (curr_data['depth'] > 0)
-    mask = mask & nan_mask
-    # Mask with presence silhouette mask (accounts for empty space)
-    if tracking and use_sil_for_loss:
-        mask = mask & (silhouette > sil_thres)
-
-    losses = {}
-    # Depth loss
-    if use_l1:
-        mask = mask.detach()
-        if tracking:
-            losses['depth'] = (torch.abs(curr_data['depth'] - depth) * mask).sum()
-        else:
-            losses['depth'] = (torch.abs(curr_data['depth'] - depth) * mask).mean()
-    
-    # RGB Loss
-    if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
-        color_mask = torch.tile(mask, (3, 1, 1))
-        color_mask = color_mask.detach()
-        losses['im'] = (torch.abs(curr_data['im'] - im) * color_mask).sum()
-    elif tracking:
-        losses['im'] = torch.abs(curr_data['im'] - im).sum()
-    else:
-        losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - fused_ssim(im[None], curr_data['im'][None]))
-
-    losses = {k: v * loss_weights[k] for k, v in losses.items()}
-    loss = sum(losses.values())
-    losses['loss'] = loss
-    return loss, losses
-
-
-@nvtx.annotate('scripts.splatam.get_loss')
-def get_loss(params, curr_data, iter_time_idx, loss_weights, use_sil_for_loss,
-             sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False, 
-             mapping=False, do_ba=False):
-
-    rendervar = get_rendervar(params, iter_time_idx, not tracking, tracking or (mapping and do_ba))
-
-    # RGB, Depth, and Silhouette Rendering
-    im, depth, silhouette = Renderer(camera=curr_data['cam'])(**rendervar)
-
-    loss, losses = compute_loss(
-        im, silhouette, depth, curr_data,
-        loss_weights, use_sil_for_loss,
-        sil_thres, use_l1, ignore_outlier_depth_loss,
-        tracking
-    )
-
-    return loss, losses
-
-
-def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
-    num_pts = new_pt_cld.shape[0]
-    means3D = new_pt_cld[:, :3] # [num_gaussians, 3]
-    unnorm_rots = np.tile([1, 0, 0, 0], (num_pts, 1)) # [num_gaussians, 4]
-    logit_opacities = torch.zeros((num_pts, 1), dtype=torch.float, device='cuda')
-    if gaussian_distribution == 'isotropic':
-        log_scales = torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 1))
-    elif gaussian_distribution == 'anisotropic':
-        log_scales = torch.tile(torch.log(torch.sqrt(mean3_sq_dist))[..., None], (1, 3))
-    else:
-        raise ValueError(f'Unknown gaussian_distribution {gaussian_distribution}')
-    params = {
-        'means3D': means3D,
-        'rgb_colors': new_pt_cld[:, 3:6],
-        'unnorm_rotations': unnorm_rots,
-        'logit_opacities': logit_opacities,
-        'log_scales': log_scales,
-    }
-    for k, v in params.items():
-        # Check if value is already a torch tensor
-        if not isinstance(v, torch.Tensor):
-            params[k] = torch.nn.Parameter(torch.tensor(v).cuda().float().contiguous().requires_grad_(True))
-        else:
-            params[k] = torch.nn.Parameter(v.cuda().float().contiguous().requires_grad_(True))
-
-    return params
-
-
-@nvtx.annotate('get_non_presence_mask')
-@torch.no_grad()
-@torch.compile
-def get_non_presence_mask(gt_depth, depth, silhouette, sil_thresh):
-    non_presence_sil_mask = (silhouette < sil_thresh)
-    # Check for new foreground objects by using GT depth
-    depth_error = torch.abs(gt_depth - depth) * (gt_depth > 0)
-    non_presence_depth_mask = (depth > gt_depth) * (depth_error > 50*depth_error.median())
-    # Determine non-presence mask
-    non_presence_mask = non_presence_sil_mask | non_presence_depth_mask
-    # Flatten mask
-    non_presence_mask = non_presence_mask.reshape(-1)
-    valid_depth_mask = gt_depth > 0
-    non_presence_mask = non_presence_mask & valid_depth_mask.reshape(-1)
-    return non_presence_mask
-
-
-@nvtx.annotate('add_new_gaussians')
-@torch.no_grad()
-def add_new_gaussians(params, curr_data, sil_thres, 
-                      time_idx, mean_sq_dist_method, gaussian_distribution):
-    # Silhouette Rendering
-    rendervar = get_rendervar(params, time_idx, False, False)
-
-    # RGB, Depth, and Silhouette Rendering
-    im, depth, silhouette = Renderer(camera=curr_data['cam'])(**rendervar)
-
-    non_presence_mask = get_non_presence_mask(curr_data['depth'][0], depth, silhouette, sil_thres)
-
-    # Get the new frame Gaussians based on the Silhouette
-    if torch.sum(non_presence_mask) > 0:
-        # Get the new pointcloud in the world frame
-        curr_w2c = build_transform(
-            params['cam_trans'][time_idx].detach(),
-            params['cam_unnorm_rots'][time_idx].detach()
-        )
-        new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['cam'].Ks[0],
-                                    curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
-                                    mean_sq_dist_method=mean_sq_dist_method)
-        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution)
-        for k, v in new_params.items():
-            params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
-
-    return params
+    return params, variables, w2c, cam
 
 
 @torch.no_grad()
@@ -254,6 +73,89 @@ def initialize_camera_pose(params, curr_time_idx, forward_prop):
         params['cam_trans'][curr_time_idx] = params['cam_trans'][curr_time_idx-1].detach()
     
     return params
+
+
+def tracking_step(config, params, time_idx, tracking_data, curr_gt_w2c):
+    tracking_iter_time_sum = 0
+    tracking_iter_time_count = 0
+    tracking_start_time = time.time()
+    if time_idx > 0 and not config['tracking']['use_gt_poses']:
+        # Reset Optimizer & Learning Rates for tracking
+        optimizer = initialize_optimizer(params, config['tracking']['lrs'], tracking=True)
+        # Keep Track of Best Candidate Rotation & Translation
+        candidate_cam_unnorm_rot = params['cam_unnorm_rots'][[time_idx]].detach().clone()
+        candidate_cam_tran = params['cam_trans'][[time_idx]].detach().clone()
+        current_min_loss = float(1e20)
+        # Tracking Optimization
+        iter = 0
+        do_continue_slam = False
+        num_iters_tracking = config['tracking']['num_iters']
+        while True:
+            iter_start_time = time.time()
+            # Loss for current frame
+            loss, losses = get_loss(params, tracking_data, time_idx, config['tracking']['loss_weights'],
+                                            config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
+                                            config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True)
+            # Backprop
+            loss.backward()
+            # Optimizer Update
+            optimizer.step()
+            optimizer.zero_grad(set_to_none=True)
+            with torch.no_grad():
+                # Save the best candidate rotation & translation
+                if loss < current_min_loss:
+                    current_min_loss = loss
+                    candidate_cam_unnorm_rot = params['cam_unnorm_rots'][[time_idx]].detach().clone()
+                    candidate_cam_tran = params['cam_trans'][[time_idx]].detach().clone()
+            # Update the runtime numbers
+            iter_end_time = time.time()
+            tracking_iter_time_sum += iter_end_time - iter_start_time
+            tracking_iter_time_count += 1
+            # Check if we should stop tracking
+            iter += 1
+            if iter == num_iters_tracking:
+                if losses['depth'] < config['tracking']['depth_loss_thres'] and config['tracking']['use_depth_loss_thres']:
+                    break
+                elif config['tracking']['use_depth_loss_thres'] and not do_continue_slam:
+                    do_continue_slam = True
+                    num_iters_tracking = 2*num_iters_tracking
+                else:
+                    break
+
+        # Copy over the best candidate rotation & translation
+        with torch.no_grad():
+            params['cam_unnorm_rots'][[time_idx]] = candidate_cam_unnorm_rot
+            params['cam_trans'][[time_idx]] = candidate_cam_tran
+    elif time_idx > 0 and config['tracking']['use_gt_poses']:
+        with torch.no_grad():
+            # Get the ground truth pose relative to frame 0
+            rel_w2c = curr_gt_w2c[-1]
+            rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
+            rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
+            rel_w2c_tran = rel_w2c[:3, 3].detach()
+            # Update the camera parameters
+            params['cam_unnorm_rots'][[time_idx]] = rel_w2c_rot_quat
+            params['cam_trans'][[time_idx]] = rel_w2c_tran
+    # Update the runtime numbers
+    tracking_end_time = time.time()
+    return tracking_iter_time_sum, tracking_iter_time_count, tracking_end_time - tracking_start_time, 1
+
+
+def densification_step(config, params, time_idx, densify_data):
+    # Add new Gaussians to the scene based on the Silhouette
+    params = add_new_gaussians(
+        params,
+        densify_data, 
+        config['mapping']['sil_thres'],
+        time_idx,
+        config['mean_sq_dist_method'],
+        config['gaussian_distribution']
+    )
+    return params
+
+
+def mapping_step(config, params, time_idx, keyframe_list):
+    pass
 
 
 def rgbd_slam(config: dict):
@@ -289,57 +191,27 @@ def rgbd_slam(config: dict):
 
     # Load Dataset
     print('Loading Dataset ...')
-    dataset_config = config['data']
-    if 'gradslam_data_cfg' not in dataset_config:
-        gradslam_data_cfg = {}
-        gradslam_data_cfg['dataset_name'] = dataset_config['dataset_name']
-    else:
-        gradslam_data_cfg = load_dataset_config(dataset_config['gradslam_data_cfg'])
-    if 'ignore_bad' not in dataset_config:
-        dataset_config['ignore_bad'] = False
-    if 'use_train_split' not in dataset_config:
-        dataset_config['use_train_split'] = True
-    if 'densification_image_height' not in dataset_config:
-        dataset_config['densification_image_height'] = dataset_config['desired_image_height']
-        dataset_config['densification_image_width'] = dataset_config['desired_image_width']
-        seperate_densification_res = False
-    else:
-        if dataset_config['densification_image_height'] != dataset_config['desired_image_height'] or \
-            dataset_config['densification_image_width'] != dataset_config['desired_image_width']:
-            seperate_densification_res = True
-        else:
-            seperate_densification_res = False
-    if 'tracking_image_height' not in dataset_config:
-        dataset_config['tracking_image_height'] = dataset_config['desired_image_height']
-        dataset_config['tracking_image_width'] = dataset_config['desired_image_width']
-        seperate_tracking_res = False
-    else:
-        if dataset_config['tracking_image_height'] != dataset_config['desired_image_height'] or \
-            dataset_config['tracking_image_width'] != dataset_config['desired_image_width']:
-            seperate_tracking_res = True
-        else:
-            seperate_tracking_res = False
     # Poses are relative to the first frame
     dataset = get_dataset(
-        config_dict=gradslam_data_cfg,
-        basedir=dataset_config['basedir'],
-        sequence=os.path.basename(dataset_config['sequence']),
-        start=dataset_config['start'],
-        end=dataset_config['end'],
-        stride=dataset_config['stride'],
-        desired_height=dataset_config['desired_image_height'],
-        desired_width=dataset_config['desired_image_width'],
+        config_dict=load_dataset_config(config['data']['gradslam_data_cfg']),
+        basedir=config['data']['basedir'],
+        sequence=os.path.basename(config['data']['sequence']),
+        start=config['data']['start'],
+        end=config['data']['end'],
+        stride=config['data']['stride'],
+        desired_height=config['data']['desired_image_height'],
+        desired_width=config['data']['desired_image_width'],
         device=device,
         relative_pose=True,
-        ignore_bad=dataset_config['ignore_bad'],
-        use_train_split=dataset_config['use_train_split'],
+        ignore_bad=config['data']['ignore_bad'],
+        use_train_split=config['data']['use_train_split'],
     )
-    num_frames = dataset_config['num_frames']
+    num_frames = config['data']['num_frames']
     if num_frames == -1:
         num_frames = len(dataset)
 
     # Initialize Parameters & Canoncial Camera parameters
-    params, variables, cam = initialize_first_timestep(
+    params, variables, first_frame_w2c, cam = initialize_first_timestep(
         dataset,
         num_frames, 
         config['scene_radius_depth_ratio'],
@@ -347,21 +219,17 @@ def rgbd_slam(config: dict):
         config['densify_factor'],
         config['gaussian_distribution']
     )
-    first_frame_w2c = cam.viewmats[0]
     tracking_cam = Camera(
-        cam.viewmats,
         cam.Ks / config['tracking_factor'],
         cam.width // config['tracking_factor'],
         cam.height // config['tracking_factor'],
     )
     densify_cam = Camera(
-        cam.viewmats,
         cam.Ks / config['densify_factor'],
         cam.width // config['densify_factor'],
         cam.height // config['densify_factor'],
     )
     mapping_cam = Camera(
-        cam.viewmats,
         cam.Ks / config['mapping_factor'],
         cam.width // config['mapping_factor'],
         cam.height // config['mapping_factor'],
@@ -412,16 +280,6 @@ def rgbd_slam(config: dict):
         # Optimize only current time step for tracking
         iter_time_idx = time_idx
         
-        # Initialize Data for Tracking
-        tracking_data = {
-            'cam': tracking_cam,
-            'im': color[:, ::config['tracking_factor'], ::config['tracking_factor']],
-            'depth': depth[:, ::config['tracking_factor'], ::config['tracking_factor']], 
-            'id': iter_time_idx,# 'intrinsics': tracking_intrinsics,
-            'w2c': first_frame_w2c,
-            'iter_gt_w2c_list': curr_gt_w2c
-        }
-        
         # Optimization Iterations
         num_iters_mapping = config['mapping']['num_iters']
         
@@ -432,86 +290,26 @@ def rgbd_slam(config: dict):
 
         # Tracking
         with nvtx.annotate(f'tracking {time_idx}'):
-            tracking_start_time = time.time()
-            if time_idx > 0 and not config['tracking']['use_gt_poses']:
-                # Reset Optimizer & Learning Rates for tracking
-                optimizer = initialize_optimizer(params, config['tracking']['lrs'], tracking=True)
-                # Keep Track of Best Candidate Rotation & Translation
-                candidate_cam_unnorm_rot = params['cam_unnorm_rots'][[time_idx]].detach().clone()
-                candidate_cam_tran = params['cam_trans'][[time_idx]].detach().clone()
-                current_min_loss = float(1e20)
-                # Tracking Optimization
-                iter = 0
-                do_continue_slam = False
-                num_iters_tracking = config['tracking']['num_iters']
-                if config['report_iter_progress']:
-                    progress_bar = tqdm(range(num_iters_tracking), desc=f'Tracking Time Step: {time_idx}')
-                while True:
-                    iter_start_time = time.time()
-                    # Loss for current frame
-                    loss, losses = get_loss(params, tracking_data, iter_time_idx, config['tracking']['loss_weights'],
-                                                    config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
-                                                    config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True)
-                    if config['use_wandb']:
-                        # Report Loss
-                        wandb_tracking_step = report_loss(losses, wandb_run, wandb_tracking_step, tracking=True)
-                    # Backprop
-                    loss.backward()
-                    # Optimizer Update
-                    optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
-                    with torch.no_grad():
-                        # Save the best candidate rotation & translation
-                        if loss < current_min_loss:
-                            current_min_loss = loss
-                            candidate_cam_unnorm_rot = params['cam_unnorm_rots'][[time_idx]].detach().clone()
-                            candidate_cam_tran = params['cam_trans'][[time_idx]].detach().clone()
-                    # Update the runtime numbers
-                    iter_end_time = time.time()
-                    tracking_iter_time_sum += iter_end_time - iter_start_time
-                    tracking_iter_time_count += 1
-                    # Check if we should stop tracking
-                    iter += 1
-                    if iter == num_iters_tracking:
-                        if losses['depth'] < config['tracking']['depth_loss_thres'] and config['tracking']['use_depth_loss_thres']:
-                            break
-                        elif config['tracking']['use_depth_loss_thres'] and not do_continue_slam:
-                            do_continue_slam = True
-                            progress_bar = tqdm(range(num_iters_tracking), desc=f'Tracking Time Step: {time_idx}')
-                            num_iters_tracking = 2*num_iters_tracking
-                            if config['use_wandb']:
-                                wandb_run.log({'Tracking/Extra Tracking Iters Frames': time_idx,
-                                            'Tracking/step': wandb_time_step})
-                        else:
-                            break
-
-                if config['report_iter_progress']:
-                    progress_bar.close()
-                # Copy over the best candidate rotation & translation
-                with torch.no_grad():
-                    params['cam_unnorm_rots'][[time_idx]] = candidate_cam_unnorm_rot
-                    params['cam_trans'][[time_idx]] = candidate_cam_tran
-            elif time_idx > 0 and config['tracking']['use_gt_poses']:
-                with torch.no_grad():
-                    # Get the ground truth pose relative to frame 0
-                    rel_w2c = curr_gt_w2c[-1]
-                    rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
-                    rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
-                    rel_w2c_tran = rel_w2c[:3, 3].detach()
-                    # Update the camera parameters
-                    params['cam_unnorm_rots'][[time_idx]] = rel_w2c_rot_quat
-                    params['cam_trans'][[time_idx]] = rel_w2c_tran
-            # Update the runtime numbers
-            tracking_end_time = time.time()
-            tracking_frame_time_sum += tracking_end_time - tracking_start_time
-            tracking_frame_time_count += 1
+            tracking_data = {
+                'cam': tracking_cam,
+                'im': color[:, ::config['tracking_factor'], ::config['tracking_factor']],
+                'depth': depth[:, ::config['tracking_factor'], ::config['tracking_factor']], 
+                'id': iter_time_idx,# 'intrinsics': tracking_intrinsics,
+                'w2c': first_frame_w2c,
+                'iter_gt_w2c_list': curr_gt_w2c
+            }
+            metrics = tracking_step(config, params, time_idx, tracking_data, curr_gt_w2c)
+            tracking_iter_time_sum += metrics[0]
+            tracking_iter_time_count += metrics[1]
+            tracking_frame_time_sum += metrics[2]
+            tracking_frame_time_count += metrics[3]
         
         # Densification & KeyFrame-based Mapping
         if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
             # Densification
-            with nvtx.annotate(f'densification {time_idx}'):
-                if config['mapping']['add_new_gaussians'] and time_idx > 0:
-                    densify_curr_data = {
+            if config['mapping']['add_new_gaussians'] and time_idx > 0:
+                with nvtx.annotate(f'densification {time_idx}'):
+                    densify_data = {
                         'cam': densify_cam,
                         'im': color[:, ::config['densify_factor'], ::config['densify_factor']],
                         'depth': depth[:, ::config['densify_factor'], ::config['densify_factor']],
@@ -519,20 +317,7 @@ def rgbd_slam(config: dict):
                         'w2c': first_frame_w2c,
                         'iter_gt_w2c_list': curr_gt_w2c
                     }
-
-                    # Add new Gaussians to the scene based on the Silhouette
-                    params = add_new_gaussians(
-                        params,
-                        densify_curr_data, 
-                        config['mapping']['sil_thres'],
-                        time_idx,
-                        config['mean_sq_dist_method'],
-                        config['gaussian_distribution']
-                    )
-                    post_num_pts = params['means3D'].shape[0]
-                    if config['use_wandb']:
-                        wandb_run.log({'Mapping/Number of Gaussians': post_num_pts,
-                                    'Mapping/step': wandb_time_step})
+                    params = densification_step(config, params, time_idx, densify_data)
             
             with nvtx.annotate(f'keyframe_mapping {time_idx}'):
                 with torch.no_grad():
@@ -685,8 +470,8 @@ def rgbd_slam(config: dict):
     params['timestep'] = time_idx
     params['intrinsics'] = cam.Ks[0].detach().cpu().numpy()
     params['w2c'] = first_frame_w2c.detach().cpu().numpy()
-    params['org_width'] = dataset_config['desired_image_width']
-    params['org_height'] = dataset_config['desired_image_height']
+    params['org_width'] = config['data']['desired_image_width']
+    params['org_height'] = config['data']['desired_image_height']
     params['gt_w2c_all_frames'] = []
     for gt_w2c_tensor in gt_w2c_all_frames:
         params['gt_w2c_all_frames'].append(gt_w2c_tensor.detach().cpu().numpy())

@@ -10,6 +10,7 @@
 
 ## Environment
 ```bash
+git submodule update --init --recursive
 mamba create -n gsplatam -c pytorch -c nvidia\
     python\
     cuda=12.1 cuda-version=12.1 cuda-cccl=12.1 cuda-nvcc=12.1 cuda-cudart-dev=12.1 cuda-libraries-dev=12.1\
@@ -20,11 +21,10 @@ mamba create -n gsplatam -c pytorch -c nvidia\
 mamba activate gsplatam
 pip install --no-deps\
     open3d\
-    git+https://github.com/JonathonLuiten/diff-gaussian-rasterization-w-depth.git@cb65e4b86bc3bd8ed42174b72a62e8d3a3a71110\
-    git+https://github.com/chahyon-ku/diff-gaussian-rasterization-taming.git
-git submodule update --init --recursive
+    gsplat==1.4
 pip install --no-deps -e\
     ./third_party/splatam\
+    ./third_party/splatam/SplaTAM/diff-gaussian-rasterization-w-depth.git
     ./third_party/fused-ssim\
     .
 ```
@@ -55,7 +55,10 @@ bash scripts/train_all.sh
 backend=gsplat
 size=tiny
 data=replica
-python scripts/train.py backend=$backend\
+nsys profile --wait primary -o $backend\_$size-$data --force-overwrite true\
+    python scripts/train.py\
+    backend=$backend\
     data@_global_=$data\
-    size@_global_=$size
+    size@_global_=$size\
+    2>&1 | tee $backend\_$size-$data\.log
 ```

@@ -101,7 +101,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
             # Process Camera Parameters
             first_frame_w2c = torch.linalg.inv(pose)
             # Setup Camera
-            cam = Camera(first_frame_w2c[None], intrinsics[None], color.shape[2], color.shape[1])
+            cam = Camera(intrinsics[None], color.shape[2], color.shape[1])
         
         # Skip frames if not eval_every
         if time_idx != 0 and (time_idx+1) % eval_every != 0:

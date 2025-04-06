@@ -9,7 +9,7 @@ from gsplatam.geometry import build_transform
 
 @dataclass
 class Camera:
-    viewmats: torch.Tensor
+    # viewmats: torch.Tensor
     Ks: torch.Tensor
     width: int
     height: int
