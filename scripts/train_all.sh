@@ -9,7 +9,7 @@ do
             python scripts/train.py backend=$backend\
                 data@_global_=$data\
                 size@_global_=$size\
-                2>&1 | tee $backend\_$size-$data\.log
+                2>&1 | tee logs/$backend\_$size-$data\.log
         done
     done
 done

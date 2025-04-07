@@ -98,41 +98,6 @@ def get_non_presence_mask(gt_depth, depth, silhouette, sil_thresh):
     return non_presence_mask
 
 
-@nvtx.annotate('add_new_gaussians')
-@torch.no_grad()
-def add_new_gaussians(
-    params, 
-    optimizer,
-    curr_data,
-    sil_thres, 
-    time_idx,
-    mean_sq_dist_method,
-    gaussian_distribution
-):
-    # RGB, Depth, and Silhouette Rendering
-    rendervar = get_rendervar(params, time_idx, False, False)
-    im, depth, silhouette = Renderer(camera=curr_data['cam'])(**rendervar)
-
-    non_presence_mask = get_non_presence_mask(curr_data['depth'][0], depth, silhouette, sil_thres)
-
-    # Get the new frame Gaussians based on the Silhouette
-    if torch.any(non_presence_mask):
-        # Get the new pointcloud in the world frame
-        curr_w2c = build_transform(
-            params['cam_trans'][time_idx].detach(),
-            params['cam_unnorm_rots'][time_idx].detach()
-        )
-        new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['cam'].Ks[0],
-                                    curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
-                                    mean_sq_dist_method=mean_sq_dist_method)
-        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution)
-        # for k, v in new_params.items():
-        #     params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
-        params = cat_params_to_optimizer(new_params, params, optimizer)
-
-    return params, optimizer
-
-
 def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribution):
     num_pts = init_pt_cld.shape[0]
     mean3_sq_dist = mean3_sq_dist.cpu()
@@ -155,8 +120,8 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
         'log_scales': log_scales,             # [num_pts, 1]
         'cam_unnorm_rots': cam_unnorm_rots,   # [num_frames, 4]
         'cam_trans': cam_trans,               # [num_frames, 3]
-        'cam_unnorm_rot': cam_unnorm_rots[0], # [4]
-        'cam_tran': cam_trans[0],             # [3]
+        # 'cam_unnorm_rot': cam_unnorm_rots[0], # [4]
+        # 'cam_tran': cam_trans[0],             # [3]
     }
 
     for k, v in params.items():
@@ -168,13 +133,9 @@ def initialize_params(init_pt_cld, num_frames, mean3_sq_dist, gaussian_distribut
     return params
 
 
-def initialize_optimizer(params, lrs_dict, tracking):
-    lrs = lrs_dict
-    param_groups = [{'params': [v], 'name': k, 'lr': lrs[k]} for k, v in params.items()]
-    if tracking:
-        return torch.optim.Adam(param_groups)
-    else:
-        return torch.optim.Adam(param_groups, lr=0.0, eps=1e-15)
+def initialize_optimizer(params, lrs_dict):
+    param_groups = [{'params': [v], 'name': k, 'lr': lrs_dict[k]} for k, v in params.items()]
+    return torch.optim.Adam(param_groups, eps=1e-15)
 
 
 def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
@@ -201,7 +162,6 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
             params[k] = torch.nn.Parameter(v.cuda().float().contiguous().requires_grad_(True))
     
     return params
-
 
 
 # torch.compiler.allow_in_graph(fused_ssim)
@@ -237,14 +197,12 @@ def compute_loss(
     
     # RGB Loss
     if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
-        color_mask = torch.tile(mask, (3, 1, 1))
-        color_mask = color_mask.detach()
-        losses['im'] = (torch.abs(curr_data['im'] - im) * color_mask).sum()
+        losses['im'] = (torch.abs(curr_data['im'] - im) * mask).sum()
     elif tracking:
         losses['im'] = torch.abs(curr_data['im'] - im).sum()
     else:
         losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - fused_ssim(im[None], curr_data['im'][None]))
-
+    
     losses = {k: v * loss_weights[k] for k, v in losses.items()}
     loss = sum(losses.values())
     losses['loss'] = loss

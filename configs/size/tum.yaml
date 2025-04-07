@@ -3,3 +3,7 @@ keyframe_every: 5
 mapping_window_size: 20
 tracking_iters: 200
 mapping_iters: 30
+
+tracking_factor: 1
+mapping_factor: 1
+densify_factor: ${eval:'2 if "${dataset_name}" == "Replica" else 1'}

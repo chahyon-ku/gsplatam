@@ -34,13 +34,22 @@ def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_
     figure[H:2*H, 2*W:3*W, :] = diff_depth_l1[0, ::2, ::2, None].cpu().numpy() / max_depth * 255
 
     # write labels with cv2
+    # make black border
+    cv2.putText(figure, 'Ground Truth RGB', (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 3)
     cv2.putText(figure, "Ground Truth RGB", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, 'Ground Truth Depth', (W + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 3)
     cv2.putText(figure, "Ground Truth Depth", (W + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, 'Rasterized Silhouette', (2*W + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 3)
     cv2.putText(figure, "Rasterized Silhouette", (2*W + 10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, 'Rasterized RGB', (10, H + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 3)
     cv2.putText(figure, "Rasterized RGB", (10, H + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, 'Rasterized Depth', (W + 10, H + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 3)
     cv2.putText(figure, "Rasterized Depth", (W + 10, H + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, 'Diff Depth L1', (2*W + 10, H + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 3)
     cv2.putText(figure, "Diff Depth L1", (2*W + 10, H + 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "PSNR: {:.2f}".format(psnr), (10, H + 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 3)
     cv2.putText(figure, "PSNR: {:.2f}".format(psnr), (10, H + 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+    cv2.putText(figure, "L1: {:.4f}".format(depth_l1), (W + 10, H + 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 0), 3)
     cv2.putText(figure, "L1: {:.4f}".format(depth_l1), (W + 10, H + 60), cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
     cv2.imwrite(os.path.join(plot_dir, f"{plot_name}.png"), figure[..., ::-1])
     
@@ -112,8 +121,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
 
         # Render Depth & Silhouette
         rendervar = get_rendervar(final_params, time_idx, gaussians_grad=False, camera_grad=False)
-        im, depth, silhouette = Renderer(camera=cam)(**rendervar)
-        rastered_depth = depth
+        im, rastered_depth, silhouette = Renderer(camera=cam)(**rendervar)
         # Mask invalid depth in GT
         valid_depth_mask = (curr_data['depth'] > 0)
         rastered_depth_viz = rastered_depth.detach()

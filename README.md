@@ -5,10 +5,12 @@
 * Hydra configs (done)
 * Single-step multi-view mapping
 * sgd / visible adam / persistent adam
-    * separate out tracking and mapping  optimizers
-* Isometric CUDA kernels (dropped)
-* Taming-cached CUDA kernels (dropped)
+    * separate out tracking and mapping optimizers
+* Isometric CUDA kernels (dropped): conics are non-diagonal anyway
+* Taming-cached CUDA kernels (dropped): high risk low return
 * Entropy-based keyframe selection based on Joey Wilson's paper
+* MCMC densfication
+* 2DGS
 
 ## Environment
 ```bash
