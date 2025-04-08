@@ -1,3 +1,4 @@
+mkdir -p logs
 for backend in gsplat orig
 do
     for data in replica tum

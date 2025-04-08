@@ -17,7 +17,7 @@ lrs:
   unnorm_rotations: 0.0
   logit_opacities: 0.0
   log_scales: 0.0
-  cam_unnorm_rots: 0.0004
+  cam_unnorm_rots: ${eval:'0.0004 if "${dataset_name}" == "Replica" else 0.002'}
   cam_trans: 0.002
 # added
 use_depth_loss_thres: False

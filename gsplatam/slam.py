@@ -427,6 +427,7 @@ def rgbd_slam(config: dict):
                     )
             
             with nvtx.annotate(f'mapping {time_idx}'):
+                mapping_optimizer = initialize_optimizer(params, config['mapping']['lrs'])
                 metrics = map_frame(
                     config,
                     params,
