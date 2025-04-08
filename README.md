@@ -1,30 +1,35 @@
 ## Todo
 
 * Generate current logs/profiles (done)
-* Compare not packed vs. packed (done): packed is faster when there are many gaussians?
+* Compare not packed vs. packed (done): packed is faster when there are more gaussians contrary to documentation
+* Hydra configs (done)
 * Single-step multi-view mapping
-* Isometric CUDA kernels
-* Taming-cached CUDA kernels
+* sgd / visible adam / persistent adam
+    * separate out tracking and mapping optimizers
+* Isometric CUDA kernels (dropped): conics are non-diagonal anyway
+* Taming-cached CUDA kernels (dropped): high risk low return
+* Entropy-based keyframe selection based on Joey Wilson's paper
+* MCMC densfication
+* 2DGS
 
 ## Environment
 ```bash
-mamba create -n jaxsplatam -c pytorch -c nvidia\
+git submodule update --init --recursive
+mamba create -n gsplatam -c pytorch -c nvidia\
     python\
     cuda=12.1 cuda-version=12.1 cuda-cccl=12.1 cuda-nvcc=12.1 cuda-cudart-dev=12.1 cuda-libraries-dev=12.1\
     gxx_linux-64=11 cmake ninja\
     pytorch=2.4.0 torchvision=0.19.0 torchaudio=2.4.0 pytorch-cuda=12.1\
     tqdm opencv imageio matplotlib kornia natsort pyyaml wandb lpips torchmetrics\
     pytorch-msssim plyfile nvtx plotly ipykernel opencv rich hydra-core
-mamba activate jaxsplatam
+mamba activate gsplatam
 pip install --no-deps\
     open3d\
-    git+https://github.com/JonathonLuiten/diff-gaussian-rasterization-w-depth.git@cb65e4b86bc3bd8ed42174b72a62e8d3a3a71110\
-    git+https://github.com/chahyon-ku/diff-gaussian-rasterization-taming.git
-git submodule update --init --recursive
+    gsplat==1.4
 pip install --no-deps -e\
     ./third_party/splatam\
+    ./third_party/splatam/SplaTAM/diff-gaussian-rasterization-w-depth.git
     ./third_party/fused-ssim\
-    ./third_party/gsplat\
     .
 ```
 
@@ -49,19 +54,15 @@ python third_party/splatam/SplaTAM/scripts/splatam.py configs/old/replica/splata
 # link error -lcuda
 export LIBRARY_PATH="$CONDA_PREFIX/lib/stubs:$LIBRARY_PATH"
 
-python third_party/splatam/SplaTAM/scripts/splatam.py configs/old/replica/splatam.py &> orig-replica.log
-python scripts/gsplat_splatam.py configs/old/replica/splatam.py &> gsplat-replica.log
-nsys profile -o orig-replica-t python third_party/splatam/SplaTAM/scripts/splatam.py configs/old/replica/splatam_t.py &> orig-replica-t.log
-nsys profile -o gsplat-replica-t python scripts/gsplat_splatam.py configs/old/replica/splatam_t.py &> gsplat-replica-t.log
-nsys profile -o orig-tum-t python third_party/splatam/SplaTAM/scripts/splatam.py  configs/old/tum/splatam_t.py &> orig-tum-t.log
-nsys profile -o gsplat-tum-t python scripts/gsplat_splatam.py configs/old/tum/splatam_t.py &> gsplat-tum-t.log
-nsys profile -o gsplat-tum python scripts/gsplat_splatam.py configs/old/tum/splatam.py &> gsplat-tum.log
+bash scripts/train_all.sh
 
-nsys profile -o taming-replica-t python scripts/taming_splatam.py configs/old/replica/splatam_t.py &> taming-replica-t.log
-nsys profile -o taming-tum-t python scripts/taming_splatam.py configs/old/tum/splatam_t.py &> taming-tum-t.log
-
-nsys profile -o gsplat_packed-replica-t python scripts/gsplat_splatam.py configs/old/replica/splatam_t.py &> gsplat_packed-replica-t.log
-nsys profile -o gsplat_packed-tum-t python scripts/gsplat_splatam.py configs/old/tum/splatam_t.py &> gsplat_packed-tum-t.log
-nsys profile -o gsplat_packed-tum-s python scripts/gsplat_splatam.py configs/old/tum/splatam_s.py &> gsplat_packed-tum-s.log
-python scripts/gsplat_splatam.py configs/old/tum/splatam.py &> gsplat_packed-tum.log
+backend=gsplat
+size=tiny
+data=replica
+nsys profile --wait primary -o $backend\_$size-$data --force-overwrite true\
+    python scripts/train.py\
+    backend=$backend\
+    data@_global_=$data\
+    size@_global_=$size\
+    2>&1 | tee $backend\_$size-$data\.log
 ```

@@ -1,5 +1,0 @@
-map_every: 1
-keyframe_every: 5
-mapping_window_size: 15
-tracking_iters: 15
-mapping_iters: 15
