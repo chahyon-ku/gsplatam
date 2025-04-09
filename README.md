@@ -59,7 +59,7 @@ nsys profile --wait primary -o $backend\_$size-$data --force-overwrite true\
 
 ## Demo
 ```bash
-sysctl -w net.core.rmem_max=1000000
+sudo sysctl -w net.core.rmem_max=100000000
 mkdir -p third_party/cyclonedds/build third_party/cyclonedds/install
 cd third_party/cyclonedds/build
 cmake .. -DCMAKE_INSTALL_PREFIX=../install
@@ -67,6 +67,9 @@ cmake --build . --config RelWithDebInfo --target install
 export CYCLONEDDS_HOME="$(pwd)/../install"
 pip install git+https://github.com/eclipse-cyclonedds/cyclonedds-python
 cd -
+mamba install aiohttp av pyee cffi cryptography pyopenssl aioice google-crc32c
+pip install --no-deps -e third_party/aiortc
+pip install --no-deps pylibsrtp
 
 python scripts/iphone_demo_live.py
 ```

@@ -1,5 +1,5 @@
 defaults:
- - data@_global_: tum
+ - data@_global_: replica
  - eval@_global_: base
  - tracking: base
  - mapping: base
@@ -10,7 +10,8 @@ defaults:
 
 # gaussian
 mean_sq_dist_method: 'projective'
-gaussian_distribution: 'isotropic'
+# gaussian_distribution: 'isotropic'
+gaussian_distribution: 'anisotropic'
 
 # train
 seed: 0

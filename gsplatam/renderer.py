@@ -63,7 +63,7 @@ class Renderer:
         colors,
         viewmats,
     ):
-        renders, alphas, info = rasterization(
+        renders, alphas, info = rasterization_2dgs(
             means=means,  # [N, 3]
             quats=quats,  # [N, 4]
             scales=scales,  # [N, 3]
