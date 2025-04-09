@@ -41,16 +41,6 @@ bash third_party/splatam/SplaTAM/bash_scripts/download_tum.sh
 
 ## Evaluate
 ```bash
-# gsplat-splatam-tiny (4/6 iterations) on replica
-python scripts/gsplat_splatam.py configs/old/replica/splatam_t.py
-# gsplat-splatam on replica
-python scripts/gsplat_splatam.py configs/old/replica/splatam.py
-# splatam on replica
-python third_party/splatam/SplaTAM/scripts/splatam.py configs/old/replica/splatam.py
-```
-
-## Benchmark
-```bash
 # link error -lcuda
 export LIBRARY_PATH="$CONDA_PREFIX/lib/stubs:$LIBRARY_PATH"
 
@@ -65,4 +55,18 @@ nsys profile --wait primary -o $backend\_$size-$data --force-overwrite true\
     data@_global_=$data\
     size@_global_=$size\
     2>&1 | tee $backend\_$size-$data\.log
+```
+
+## Demo
+```bash
+sysctl -w net.core.rmem_max=1000000
+mkdir -p third_party/cyclonedds/build third_party/cyclonedds/install
+cd third_party/cyclonedds/build
+cmake .. -DCMAKE_INSTALL_PREFIX=../install
+cmake --build . --config RelWithDebInfo --target install
+export CYCLONEDDS_HOME="$(pwd)/../install"
+pip install git+https://github.com/eclipse-cyclonedds/cyclonedds-python
+cd -
+
+python scripts/iphone_demo_live.py
 ```

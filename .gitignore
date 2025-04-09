@@ -1,5 +1,5 @@
 /data
-/logs*
+/logs
 /experiments*
 /wandb
 /third_party

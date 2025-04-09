@@ -60,7 +60,7 @@ vis = None
 
 def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--config", default="./configs/iphone/online_demo.py", type=str, help="Path to config file.")
+    parser.add_argument("--config", default="./configs/iphone/live_demo.py", type=str, help="Path to config file.")
     return parser.parse_args()
 
 
