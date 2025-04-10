@@ -1,8 +1,7 @@
 import os
 import time
-from SplaTAM.utils.slam_external import cat_params_to_optimizer
+import hydra
 import nvtx
-import wandb
 import torch
 import torch.nn.functional as F
 import numpy as np
@@ -10,15 +9,12 @@ from torch.utils.data import DataLoader
 from tqdm import tqdm
 
 from SplaTAM.utils.common_utils import save_params_ckpt, save_params
-from SplaTAM.utils.eval_helpers import report_loss
 from SplaTAM.utils.slam_helpers import matrix_to_quaternion
-from SplaTAM.scripts.splatam import get_dataset
-from SplaTAM.datasets.gradslam_datasets import load_dataset_config
 
 from gsplatam.eval import eval
 from gsplatam.geometry import build_transform, get_pointcloud
 from gsplatam.gs import get_loss, get_non_presence_mask, initialize_new_params, initialize_optimizer, initialize_params, prune_gaussians, keyframe_selection_overlap
-from gsplatam.renderer import Camera, Renderer, get_rendervar
+from gsplatam.renderer import Camera
 
 
 def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio, 
@@ -79,11 +75,31 @@ def initialize_camera_pose(params, time_idx, forward_prop):
     return params
 
 
-def track_frame(config, params, optimizer, time_idx, tracking_data, curr_gt_w2c):
+def track_frame(
+    config,
+    render_fn,
+    params,
+    optimizer,
+    time_idx,
+    color,
+    depth,
+    tracking_cam,
+    first_frame_w2c,
+    gt_w2c_all_frames,
+):
     tracking_iter_time_sum = 0
     tracking_iter_time_count = 0
     tracking_start_time = time.time()
     if time_idx > 0 and not config['tracking']['use_gt_poses']:
+        curr_data = {
+            'cam': tracking_cam,
+            'im': color[:, ::config['tracking_factor'], ::config['tracking_factor']],
+            'depth': depth[:, ::config['tracking_factor'], ::config['tracking_factor']],
+            'id': time_idx,
+            'w2c': first_frame_w2c,
+            'iter_gt_w2c_list': gt_w2c_all_frames
+        }
+
         # Reset Optimizer & Learning Rates for tracking
         # Keep Track of Best Candidate Rotation & Translation
         candidate_cam_unnorm_rot = params['cam_unnorm_rots'][[time_idx]].detach().clone()
@@ -97,8 +113,9 @@ def track_frame(config, params, optimizer, time_idx, tracking_data, curr_gt_w2c)
             iter_start_time = time.time()
             # Loss for current frame
             loss, losses = get_loss(
+                render_fn,
                 params,
-                tracking_data,
+                curr_data,
                 time_idx,
                 config['tracking']['loss_weights'],
                 config['tracking']['use_sil_for_loss'],
@@ -142,7 +159,7 @@ def track_frame(config, params, optimizer, time_idx, tracking_data, curr_gt_w2c)
     elif time_idx > 0 and config['tracking']['use_gt_poses']:
         with torch.no_grad():
             # Get the ground truth pose relative to frame 0
-            rel_w2c = curr_gt_w2c[-1]
+            rel_w2c = gt_w2c_all_frames[-1]
             rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
             rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
             rel_w2c_tran = rel_w2c[:3, 3].detach()
@@ -154,21 +171,34 @@ def track_frame(config, params, optimizer, time_idx, tracking_data, curr_gt_w2c)
     return tracking_iter_time_sum, tracking_iter_time_count, tracking_end_time - tracking_start_time, 1
 
 
-@nvtx.annotate('densify_step')
 @torch.no_grad()
 def densify_frame(
+    config,
+    render_fn,
     params, 
     optimizer,
     time_idx,
-    curr_data,
-    sil_thres, 
-    mean_sq_dist_method,
-    gaussian_distribution
+    color,
+    depth,
+    densify_cam,
+    first_frame_w2c,
+    gt_w2c_all_frames,
+    # sil_thres, 
+    # mean_sq_dist_method,
+    # gaussian_distribution
 ):
     # RGB, Depth, and Silhouette Rendering
-    rendervar = get_rendervar(params, time_idx, False, False)
-    im, depth, silhouette = Renderer(camera=curr_data['cam'])(**rendervar)
-    non_presence_mask = get_non_presence_mask(curr_data['depth'][0], depth, silhouette, sil_thres)
+    curr_data = {
+        'cam': densify_cam,
+        'im': color[:, ::config['densify_factor'], ::config['densify_factor']],
+        'depth': depth[:, ::config['densify_factor'], ::config['densify_factor']],
+        'id': time_idx,
+        'w2c': first_frame_w2c,
+        'iter_gt_w2c_list': gt_w2c_all_frames
+    }
+    im, depth, silhouette = render_fn(curr_data['cam'], params, time_idx, False, False)
+    
+    non_presence_mask = get_non_presence_mask(curr_data['depth'][0], depth, silhouette, config['mapping']['sil_thres'])
 
     # Get the new frame Gaussians based on the Silhouette
     if torch.any(non_presence_mask):
@@ -179,17 +209,17 @@ def densify_frame(
         )
         new_pt_cld, mean3_sq_dist = get_pointcloud(curr_data['im'], curr_data['depth'], curr_data['cam'].Ks[0],
                                     curr_w2c, mask=non_presence_mask, compute_mean_sq_dist=True,
-                                    mean_sq_dist_method=mean_sq_dist_method)
-        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution)
-        # for k, v in new_params.items():
-        #     params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
-        params = cat_params_to_optimizer(new_params, params, optimizer)
+                                    mean_sq_dist_method=config['mean_sq_dist_method'])
+        new_params = initialize_new_params(new_pt_cld, mean3_sq_dist, config['gaussian_distribution'])
+        for k, v in new_params.items():
+            params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
 
     return params, optimizer
 
 
 def map_frame(
     config,
+    render_fn,
     params,
     variables,
     mapping_optimizer,
@@ -250,6 +280,7 @@ def map_frame(
         }
         # Loss for current frame
         loss, losses = get_loss(
+            render_fn,
             params,
             iter_data,
             iter_time_idx,
@@ -282,6 +313,8 @@ def map_frame(
 
 
 def rgbd_slam(config: dict):
+    render_fn = hydra.utils.instantiate(config['render_fn'])
+
     # Create Output Directories
     output_dir = os.path.join(config['workdir'], config['run_name'])
     eval_dir = os.path.join(output_dir, 'eval')
@@ -292,21 +325,7 @@ def rgbd_slam(config: dict):
 
     # Load Dataset
     print('Loading Dataset ...')
-    # Poses are relative to the first frame
-    dataset = get_dataset(
-        config_dict=load_dataset_config(config['data']['gradslam_data_cfg']),
-        basedir=config['data']['basedir'],
-        sequence=os.path.basename(config['data']['sequence']),
-        start=config['data']['start'],
-        end=config['data']['end'],
-        stride=config['data']['stride'],
-        desired_height=config['data']['desired_image_height'],
-        desired_width=config['data']['desired_image_width'],
-        device=device,
-        relative_pose=True,
-        ignore_bad=config['data']['ignore_bad'],
-        use_train_split=config['data']['use_train_split'],
-    )
+    dataset = hydra.utils.instantiate(config['data']['dataset'],)
     num_frames = config['data']['num_frames']
     if num_frames == -1:
         num_frames = len(dataset)
@@ -320,21 +339,15 @@ def rgbd_slam(config: dict):
         config['densify_factor'],
         config['gaussian_distribution']
     )
-    tracking_cam = Camera(
-        cam.Ks / config['tracking_factor'],
-        cam.width // config['tracking_factor'],
-        cam.height // config['tracking_factor'],
-    )
-    densify_cam = Camera(
-        cam.Ks / config['densify_factor'],
-        cam.width // config['densify_factor'],
-        cam.height // config['densify_factor'],
-    )
-    mapping_cam = Camera(
-        cam.Ks / config['mapping_factor'],
-        cam.width // config['mapping_factor'],
-        cam.height // config['mapping_factor'],
-    )
+    tracking_cam, densify_cam, mapping_cam = [Camera(
+        cam.Ks / factor,
+        cam.width // factor,
+        cam.height // factor,
+    ) for factor in [
+        config['tracking_factor'],
+        config['densify_factor'],
+        config['mapping_factor']
+    ]]
     
     # Initialize list to keep track of Keyframes
     keyframe_list = []
@@ -377,27 +390,29 @@ def rgbd_slam(config: dict):
         color = color.permute(2, 0, 1) / 255
         depth = depth.permute(2, 0, 1)
         gt_w2c_all_frames.append(gt_w2c)
-        curr_gt_w2c = gt_w2c_all_frames
 
         time_idx_tqdm.set_postfix_str(f'num_gaussians: {params['means3D'].shape[0]}')
 
         # Tracking
         with nvtx.annotate(f'tracking {time_idx}'):
-            tracking_data = {
-                'cam': tracking_cam,
-                'im': color[:, ::config['tracking_factor'], ::config['tracking_factor']],
-                'depth': depth[:, ::config['tracking_factor'], ::config['tracking_factor']], 
-                'id': time_idx,# 'intrinsics': tracking_intrinsics,
-                'w2c': first_frame_w2c,
-                'iter_gt_w2c_list': curr_gt_w2c
-            }
             # Initialize the camera pose for the current frame
             params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
             tracking_optimizer = initialize_optimizer(
                 {k: v for k, v in params.items() if k in ['cam_unnorm_rots', 'cam_trans']},
                 config['tracking']['lrs']
             )
-            metrics = track_frame(config, params, tracking_optimizer, time_idx, tracking_data, curr_gt_w2c)
+            metrics = track_frame(
+                config,
+                render_fn,
+                params,
+                tracking_optimizer,
+                time_idx,
+                color,
+                depth,
+                tracking_cam,
+                first_frame_w2c,
+                gt_w2c_all_frames,
+            )
             tracking_iter_time_sum += metrics[0]
             tracking_iter_time_count += metrics[1]
             tracking_frame_time_sum += metrics[2]
@@ -408,28 +423,24 @@ def rgbd_slam(config: dict):
             # Densification
             if config['mapping']['add_new_gaussians'] and time_idx > 0:
                 with nvtx.annotate(f'densification {time_idx}'):
-                    densify_data = {
-                        'cam': densify_cam,
-                        'im': color[:, ::config['densify_factor'], ::config['densify_factor']],
-                        'depth': depth[:, ::config['densify_factor'], ::config['densify_factor']],
-                        'id': time_idx,
-                        'w2c': first_frame_w2c,
-                        'iter_gt_w2c_list': curr_gt_w2c
-                    }
                     params, mapping_optimizer = densify_frame(
+                        config,
+                        render_fn,
                         params,
                         mapping_optimizer,
                         time_idx,
-                        densify_data, 
-                        config['mapping']['sil_thres'],
-                        config['mean_sq_dist_method'],
-                        config['gaussian_distribution']
+                        color,
+                        depth,
+                        densify_cam,
+                        first_frame_w2c,
+                        gt_w2c_all_frames,
                     )
             
             with nvtx.annotate(f'mapping {time_idx}'):
                 mapping_optimizer = initialize_optimizer(params, config['mapping']['lrs'])
                 metrics = map_frame(
                     config,
+                    render_fn,
                     params,
                     variables,
                     mapping_optimizer,
@@ -448,7 +459,7 @@ def rgbd_slam(config: dict):
         
         # Add frame to keyframe list
         if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
-                    (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
+                    (time_idx == num_frames-2)) and (not torch.isinf(gt_w2c_all_frames[-1]).any()) and (not torch.isnan(gt_w2c_all_frames[-1]).any()):
             with torch.no_grad():
                 # Get the current estimated rotation & translation
                 curr_w2c = build_transform(
@@ -484,9 +495,12 @@ def rgbd_slam(config: dict):
     print(f'Average Mapping/Frame Time: {mapping_frame_time_avg} s')
 
     # Evaluate Final Parameters
-    eval(dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
-            mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
-            eval_every=config['eval_every'])
+    eval(
+        render_fn,
+        dataset, params, num_frames, eval_dir, sil_thres=config['mapping']['sil_thres'],
+        mapping_iters=config['mapping']['num_iters'], add_new_gaussians=config['mapping']['add_new_gaussians'],
+        eval_every=config['eval_every']
+    )
 
     # Add Camera Parameters to Save them
     params['timestep'] = time_idx

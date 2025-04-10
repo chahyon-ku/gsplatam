@@ -13,7 +13,23 @@ from SplaTAM.utils.slam_external import calc_psnr
 from SplaTAM.utils.eval_helpers import evaluate_ate, loss_fn_alex
 
 from gsplatam.geometry import build_transform
-from gsplatam.renderer import Camera, Renderer, get_rendervar
+from gsplatam.renderer import Camera
+
+
+def rotation_error(gt_w2c_list, est_w2c_list):
+    """
+    Compute the rotation error between the estimated and ground truth camera poses in degrees.
+    """
+    errors = []
+    for gt_w2c, est_w2c in zip(gt_w2c_list, est_w2c_list):
+        gt_rot = gt_w2c[:3, :3]
+        est_rot = est_w2c[:3, :3]
+        gt_rot_inv = torch.linalg.inv(gt_rot)
+        relative_rot = torch.matmul(est_rot, gt_rot_inv)
+        angle = torch.acos(torch.clamp((torch.trace(relative_rot) - 1) / 2, -1, 1))
+        angle_deg = torch.rad2deg(angle)
+        errors.append(angle_deg.item())
+    return errors
 
 
 def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_sil_mask, diff_depth_l1,
@@ -61,8 +77,11 @@ def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_
 
 
 @torch.no_grad()
-def eval(dataset, final_params, num_frames, eval_dir, sil_thres, 
-         mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1, save_frames=False):
+def eval(
+    render_fn,
+    dataset, final_params, num_frames, eval_dir, sil_thres, 
+    mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1, save_frames=False
+):
     print("Evaluating Final Parameters ...")
     psnr_list = []
     rmse_list = []
@@ -120,8 +139,7 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'w2c': first_frame_w2c}
 
         # Render Depth & Silhouette
-        rendervar = get_rendervar(final_params, time_idx, gaussians_grad=False, camera_grad=False)
-        im, rastered_depth, silhouette = Renderer(camera=cam)(**rendervar)
+        im, rastered_depth, silhouette = render_fn(cam, final_params, time_idx, False, False)
         # Mask invalid depth in GT
         valid_depth_mask = (curr_data['depth'] > 0)
         rastered_depth_viz = rastered_depth.detach()
@@ -227,7 +245,9 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
     gt_w2c_list = valid_gt_w2c_list
     # Calculate ATE RMSE
     ate_rmse = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
+    mean_rotation_error_deg = rotation_error(gt_w2c_list, latest_est_w2c_list)
     print("Final Average ATE RMSE: {:.2f} cm".format(ate_rmse*100))
+    print("Final Average Rotation Error: {:.2f} degrees".format(np.mean(mean_rotation_error_deg)))
     if wandb_run is not None:
         wandb_run.log({"Final Stats/Avg ATE RMSE": ate_rmse,
                     "Final Stats/step": 1})
@@ -280,119 +300,3 @@ def eval(dataset, final_params, num_frames, eval_dir, sil_thres,
         wandb_run.log({"Eval/Metrics": fig})
     plt.close()
 
-
-@torch.no_grad()
-def report_progress(params, data, i, progress_bar, iter_time_idx, sil_thres, every_i=1, qual_every_i=1, 
-                    tracking=False, mapping=False, wandb_run=None, wandb_step=None, wandb_save_qual=False, online_time_idx=None,
-                    global_logging=True):
-    if i % every_i == 0 or i == 1:
-        if wandb_run is not None:
-            if tracking:
-                stage = "Tracking"
-            elif mapping:
-                stage = "Mapping"
-            else:
-                stage = "Current Frame Optimization"
-        if not global_logging:
-            stage = "Per Iteration " + stage
-
-        if tracking:
-            # Get list of gt poses
-            gt_w2c_list = data['iter_gt_w2c_list']
-            valid_gt_w2c_list = []
-            
-            # Get latest trajectory
-            latest_est_w2c = data['w2c']
-            latest_est_w2c_list = []
-            latest_est_w2c_list.append(latest_est_w2c)
-            valid_gt_w2c_list.append(gt_w2c_list[0])
-            for idx in range(1, iter_time_idx+1):
-                # Check if gt pose is not nan for this time step
-                if torch.isnan(gt_w2c_list[idx]).sum() > 0:
-                    continue
-                intermrel_w2c = build_transform(
-                    params['cam_trans'][idx].detach(),
-                    params['cam_unnorm_rots'][idx].detach()
-                )
-                latest_est_w2c = intermrel_w2c
-                latest_est_w2c_list.append(latest_est_w2c)
-                valid_gt_w2c_list.append(gt_w2c_list[idx])
-
-            # Get latest gt pose
-            gt_w2c_list = valid_gt_w2c_list
-            iter_gt_w2c = gt_w2c_list[-1]
-            # Get euclidean distance error between latest and gt pose
-            iter_pt_error = torch.sqrt((latest_est_w2c[0,3] - iter_gt_w2c[0,3])**2 + (latest_est_w2c[1,3] - iter_gt_w2c[1,3])**2 + (latest_est_w2c[2,3] - iter_gt_w2c[2,3])**2)
-            if iter_time_idx > 0:
-                # Calculate relative pose error
-                rel_gt_w2c = relative_transformation(gt_w2c_list[-2], gt_w2c_list[-1])
-                rel_est_w2c = relative_transformation(latest_est_w2c_list[-2], latest_est_w2c_list[-1])
-                rel_pt_error = torch.sqrt((rel_gt_w2c[0,3] - rel_est_w2c[0,3])**2 + (rel_gt_w2c[1,3] - rel_est_w2c[1,3])**2 + (rel_gt_w2c[2,3] - rel_est_w2c[2,3])**2)
-            else:
-                rel_pt_error = torch.zeros(1).float()
-            
-            # Calculate ATE RMSE
-            ate_rmse = evaluate_ate(gt_w2c_list, latest_est_w2c_list)
-            ate_rmse = np.round(ate_rmse, decimals=6)
-            if wandb_run is not None:
-                tracking_log = {f"{stage}/Latest Pose Error":iter_pt_error, 
-                               f"{stage}/Latest Relative Pose Error":rel_pt_error,
-                               f"{stage}/ATE RMSE":ate_rmse}
-
-        rendervar = get_rendervar(params, iter_time_idx, gaussians_grad=False, camera_grad=False)
-        im, depth, silhouette = Renderer(camera=data['cam'])(**rendervar)
-        rastered_depth = depth
-        valid_depth_mask = (data['depth'] > 0)
-        presence_sil_mask = (silhouette > sil_thres)
-
-        if tracking:
-            psnr = calc_psnr(im * presence_sil_mask, data['im'] * presence_sil_mask).mean()
-        else:
-            psnr = calc_psnr(im, data['im']).mean()
-
-        if tracking:
-            diff_depth_rmse = torch.sqrt((((rastered_depth - data['depth']) * presence_sil_mask) ** 2))
-            diff_depth_rmse = diff_depth_rmse * valid_depth_mask
-            rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
-            diff_depth_l1 = torch.abs((rastered_depth - data['depth']) * presence_sil_mask)
-            diff_depth_l1 = diff_depth_l1 * valid_depth_mask
-            depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
-        else:
-            diff_depth_rmse = torch.sqrt((((rastered_depth - data['depth'])) ** 2))
-            diff_depth_rmse = diff_depth_rmse * valid_depth_mask
-            rmse = diff_depth_rmse.sum() / valid_depth_mask.sum()
-            diff_depth_l1 = torch.abs((rastered_depth - data['depth']))
-            diff_depth_l1 = diff_depth_l1 * valid_depth_mask
-            depth_l1 = diff_depth_l1.sum() / valid_depth_mask.sum()
-
-        if not (tracking or mapping):
-            progress_bar.set_postfix({f"Time-Step: {iter_time_idx} | PSNR: {psnr:.{7}} | Depth RMSE: {rmse:.{7}} | L1": f"{depth_l1:.{7}}"})
-            progress_bar.update(every_i)
-        elif tracking:
-            progress_bar.set_postfix({f"Time-Step: {iter_time_idx} | Rel Pose Error: {rel_pt_error.item():.{7}} | Pose Error: {iter_pt_error.item():.{7}} | ATE RMSE": f"{ate_rmse.item():.{7}}"})
-            progress_bar.update(every_i)
-        elif mapping:
-            progress_bar.set_postfix({f"Time-Step: {online_time_idx} | Frame {data['id']} | PSNR: {psnr:.{7}} | Depth RMSE: {rmse:.{7}} | L1": f"{depth_l1:.{7}}"})
-            progress_bar.update(every_i)
-        
-        if wandb_run is not None:
-            wandb_log = {f"{stage}/PSNR": psnr,
-                         f"{stage}/Depth RMSE": rmse,
-                         f"{stage}/Depth L1": depth_l1,
-                         f"{stage}/step": wandb_step}
-            if tracking:
-                wandb_log = {**wandb_log, **tracking_log}
-            wandb_run.log(wandb_log)
-        
-        if wandb_save_qual and (i % qual_every_i == 0 or i == 1):
-            # Silhouette Mask
-            presence_sil_mask = presence_sil_mask.detach().cpu().numpy()
-
-            # Log plot to wandb
-            if not mapping:
-                fig_title = f"Time-Step: {iter_time_idx} | Iter: {i} | Frame: {data['id']}"
-            else:
-                fig_title = f"Time-Step: {online_time_idx} | Iter: {i} | Frame: {data['id']}"
-            plot_rgbd_silhouette(data['im'], data['depth'], im, rastered_depth, presence_sil_mask, diff_depth_l1,
-                                 psnr, depth_l1, fig_title, wandb_run=wandb_run, wandb_step=wandb_step, 
-                                 wandb_title=f"{stage} Qual Viz")

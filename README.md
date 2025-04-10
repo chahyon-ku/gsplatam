@@ -21,7 +21,8 @@ mamba create -n gsplatam -c pytorch -c nvidia\
     gxx_linux-64=11 cmake ninja\
     pytorch=2.4.0 torchvision=0.19.0 torchaudio=2.4.0 pytorch-cuda=12.1\
     tqdm opencv imageio matplotlib kornia natsort pyyaml wandb lpips torchmetrics\
-    pytorch-msssim plyfile nvtx plotly ipykernel opencv rich hydra-core
+    pytorch-msssim plyfile nvtx plotly ipykernel opencv rich hydra-core\
+    dash scikit-learn addict pandas
 mamba activate gsplatam
 pip install --no-deps\
     open3d\

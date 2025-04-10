@@ -1,1 +1,2 @@
-_target_: SplaTAM.scripts.splatam.rgbd_slam
+backend:
+  _target_: SplaTAM.scripts.splatam.rgbd_slam

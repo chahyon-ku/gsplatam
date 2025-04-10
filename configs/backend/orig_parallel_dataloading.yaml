@@ -1,0 +1,2 @@
+backend:
+  _target_: SplaTAM.scripts.splatam_parallel_dataloading.rgbd_slam

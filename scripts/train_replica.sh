@@ -1,8 +1,8 @@
 mkdir -p logs
 for backend in gsplat orig
 do
-    data=tum
-    for size in tiny small base tum # tiny small small2 base tum
+    data=replica
+    for size in tiny small base # tiny small small2 base tum
     do
         echo "Training $backend on $data with model size $size"
         # nsys profile --force-overwrite true -o $backend\_$size-$data\

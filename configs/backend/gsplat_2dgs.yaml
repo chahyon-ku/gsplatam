@@ -3,4 +3,4 @@ backend:
 
 render_fn:
   _target_: gsplatam.renderer.get_render_fn
-  type: gsplat
+  type: gsplat_2dgs

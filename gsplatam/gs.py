@@ -3,12 +3,11 @@ import nvtx
 import torch
 
 from fused_ssim import fused_ssim
-from SplaTAM.utils.slam_external import cat_params_to_optimizer, inverse_sigmoid, update_params_and_optimizer
+from SplaTAM.utils.slam_external import inverse_sigmoid, update_params_and_optimizer
 from SplaTAM.utils.slam_helpers import l1_loss_v1
 from SplaTAM.utils.keyframe_selection import get_pointcloud as get_keyframe_pointcloud
 
-from gsplatam.geometry import build_transform, get_percent_inside, get_pointcloud
-from gsplatam.renderer import Renderer, get_rendervar
+from gsplatam.geometry import get_percent_inside
 
 
 def remove_points(to_remove, params, optimizer):
@@ -210,14 +209,13 @@ def compute_loss(
 
 
 @nvtx.annotate('scripts.splatam.get_loss')
-def get_loss(params, curr_data, iter_time_idx, loss_weights, use_sil_for_loss,
-             sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False, 
-             mapping=False, do_ba=False):
-
-    rendervar = get_rendervar(params, iter_time_idx, not tracking, tracking or (mapping and do_ba))
-
-    # RGB, Depth, and Silhouette Rendering
-    im, depth, silhouette = Renderer(camera=curr_data['cam'])(**rendervar)
+def get_loss(
+    render_fn,
+    params, curr_data, iter_time_idx, loss_weights, use_sil_for_loss,
+    sil_thres, use_l1, ignore_outlier_depth_loss, tracking=False, 
+    mapping=False, do_ba=False
+):
+    im, depth, silhouette = render_fn(curr_data['cam'], params, iter_time_idx, not tracking, tracking or (mapping and do_ba))
 
     loss, losses = compute_loss(
         im, silhouette, depth, curr_data,

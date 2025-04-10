@@ -1,0 +1,18 @@
+
+data:
+  dataset:
+    _target_: SplaTAM.scripts.splatam.get_dataset
+    config_dict:
+      _target_: SplaTAM.scripts.splatam.load_dataset_config
+      path: ${data.gradslam_data_cfg}
+    basedir: ${data.basedir}
+    sequence: ${data.sequence}
+    start: ${data.start}
+    end: ${data.end}
+    stride: ${data.stride}
+    desired_height: ${data.desired_image_height}
+    desired_width: ${data.desired_image_width}
+    device: cuda
+    relative_pose: True
+    ignore_bad: ${data.ignore_bad}
+    use_train_split: ${data.use_train_split}

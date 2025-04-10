@@ -1,3 +1,7 @@
+defaults:
+  - _self_
+  - base
+
 dataset_name: 'Replica'
 scene_name: 'room0'
 scene_radius_depth_ratio: 3

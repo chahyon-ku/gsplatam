@@ -5,19 +5,18 @@ defaults:
  - mapping: base
  - viz: base
  - size@_global_: tiny
- - backend: gsplat
+ - backend@_global_: gsplat
  - _self_
 
 # gaussian
-mean_sq_dist_method: 'projective'
-# gaussian_distribution: 'isotropic'
-gaussian_distribution: 'anisotropic'
+mean_sq_dist_method: projective
+gaussian_distribution: isotropic
 
 # train
 seed: 0
-run_name: '${hydra:runtime.choices.backend}_${hydra:runtime.choices.size@_global_}-${scene_name}-seed${seed}'
-workdir: './experiments/${dataset_name}'
-output_dir: '${workdir}/${run_name}'
+run_name: ${hydra:runtime.choices.backend@_global_}_${hydra:runtime.choices.size@_global_}${eval:'"_aniso" if "${gaussian_distribution}" == "anisotropic" else ""'}-${scene_name}-seed${seed}
+workdir: ./experiments/${dataset_name}
+output_dir: ${workdir}/${run_name}
 hydra:
   run:
     dir: ${output_dir}

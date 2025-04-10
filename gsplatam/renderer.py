@@ -1,15 +1,17 @@
 from dataclasses import dataclass
-from gsplat import rasterization, rasterization_2dgs
+from typing import Dict, Tuple
 import nvtx
 import torch
 import torch.nn.functional as F
 
+from gsplat import rasterization, rasterization_2dgs
 from gsplatam.geometry import build_transform
+from SplaTAM.utils.gs_helpers import transform_to_frame, transformed_params2depthplussilhouette, transformed_params2rendervar, Renderer
+from SplaTAM.utils.recon_helpers import setup_camera
 
 
 @dataclass
 class Camera:
-    # viewmats: torch.Tensor
     Ks: torch.Tensor
     width: int
     height: int
@@ -21,12 +23,8 @@ class Camera:
 def get_rendervar(
     params, iter_time_idx, gaussians_grad, camera_grad
 ):
-    if iter_time_idx == -1:
-        cam_rot = params['cam_unnorm_rot']
-        cam_tran = params['cam_tran']
-    else:
-        cam_rot = params['cam_unnorm_rots'][iter_time_idx]
-        cam_tran = params['cam_trans'][iter_time_idx]
+    cam_rot = params['cam_unnorm_rots'][iter_time_idx]
+    cam_tran = params['cam_trans'][iter_time_idx]
 
     viewmat = build_transform(
         cam_tran if camera_grad else cam_tran.detach(),
@@ -49,39 +47,80 @@ def get_rendervar(
     return rendervar
 
 
-class Renderer:
-    def __init__(self, camera: Camera):
-        self.camera = camera
+def render_gsplat(
+    camera: Camera,
+    params: Dict[str, torch.Tensor],
+    iter_time_idx: int,
+    gaussians_grad: bool,
+    camera_grad: bool,
+):
+    rendervar = get_rendervar(
+        params=params,
+        iter_time_idx=iter_time_idx,
+        gaussians_grad=gaussians_grad,
+        camera_grad=camera_grad
+    )
 
-    @nvtx.annotate("Renderer.__call__")
-    def __call__(
-        self,
-        means,
-        quats,
-        scales,
-        opacities,
-        colors,
-        viewmats,
-    ):
-        renders, alphas, info = rasterization_2dgs(
-            means=means,  # [N, 3]
-            quats=quats,  # [N, 4]
-            scales=scales,  # [N, 3]
-            opacities=opacities,  # [N,]
-            colors=colors,
-            render_mode='RGB+ED',
-            viewmats=viewmats,  # [C, 4, 4]
-            Ks=self.camera.Ks,  # [C, 3, 3]
-            width=self.camera.width,
-            height=self.camera.height,
-            near_plane=self.camera.near_plane,
-            far_plane=self.camera.far_plane,
-            eps2d=0,
-            packed=True,
-            sh_degree=None,
-        )
-        # [C, H, W, 3] -> [3, H, W]
-        renders = renders[0].permute(2, 0, 1)
-        alphas = alphas[0].permute(2, 0, 1)
+    renders, silhouette, info = rasterization(
+        **rendervar,
+        render_mode='RGB+ED',
+        Ks=camera.Ks,  # [C, 3, 3]
+        width=camera.width,
+        height=camera.height,
+        near_plane=camera.near_plane,
+        far_plane=camera.far_plane,
+        eps2d=0,
+        packed=True,
+        sh_degree=None,
+    )
 
-        return renders[:-1], renders[-1:], alphas
+    # [C, H, W, 3] -> [3, H, W]
+    renders = renders[0].permute(2, 0, 1)
+    silhouette = silhouette[0].permute(2, 0, 1)
+    im, depth = renders[:-1], renders[-1:]
+
+    return im, depth, silhouette
+
+
+def render_gsplat_2dgs(
+    camera: Camera,
+    params: Dict[str, torch.Tensor],
+    iter_time_idx: int,
+    gaussians_grad: bool,
+    camera_grad: bool,
+):
+    rendervar = get_rendervar(
+        params=params,
+        iter_time_idx=iter_time_idx,
+        gaussians_grad=gaussians_grad,
+        camera_grad=camera_grad
+    )
+
+    renders, silhouette, info = rasterization_2dgs(
+        **rendervar,
+        render_mode='RGB+ED',
+        Ks=camera.Ks,  # [C, 3, 3]
+        width=camera.width,
+        height=camera.height,
+        near_plane=camera.near_plane,
+        far_plane=camera.far_plane,
+        eps2d=0,
+        packed=True,
+        sh_degree=None,
+    )
+
+    # [C, H, W, 3] -> [3, H, W]
+    renders = renders[0].permute(2, 0, 1)
+    silhouette = silhouette[0].permute(2, 0, 1)
+    im, depth = renders[:-1], renders[-1:]
+
+    return im, depth, silhouette
+
+
+def get_render_fn(type: str):
+    if type == 'gsplat':
+        return render_gsplat
+    elif type == 'gsplat_2dgs':
+        return render_gsplat_2dgs
+    else:
+        raise ValueError(f"Unknown renderer type: {type}")
