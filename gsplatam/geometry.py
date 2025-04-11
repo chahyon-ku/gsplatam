@@ -1,28 +1,33 @@
 import nvtx
 import torch
+import torch.nn.functional as F
 
 from gsplat.cuda._wrapper import fully_fused_projection
 
 
 @torch.compile
 def build_transform(trans, q):
-    assert len(trans.shape) == 1 and len(q.shape) == 1
+    # assert len(trans.shape) == 2 and len(q.shape) == 1
 
-    transform = torch.eye(4, dtype=torch.float32, device='cuda')
-    transform[0, 0] = 1 - 2 * q[2] * q[2] - 2 * q[3] * q[3]
-    transform[0, 1] = 2 * q[1] * q[2] - 2 * q[0] * q[3]
-    transform[0, 2] = 2 * q[1] * q[3] + 2 * q[0] * q[2]
-    transform[1, 0] = 2 * q[1] * q[2] + 2 * q[0] * q[3]
-    transform[1, 1] = 1 - 2 * q[1] * q[1] - 2 * q[3] * q[3]
-    transform[1, 2] = 2 * q[2] * q[3] - 2 * q[0] * q[1]
-    transform[2, 0] = 2 * q[1] * q[3] - 2 * q[0] * q[2]
-    transform[2, 1] = 2 * q[2] * q[3] + 2 * q[0] * q[1]
-    transform[2, 2] = 1 - 2 * q[1] * q[1] - 2 * q[2] * q[2]
-    transform[:3, 3] = trans
+    if len(trans.shape) == 1 and len(q.shape) == 1:
+        transform = torch.zeros((4, 4), dtype=torch.float32, device='cuda')
+    elif len(trans.shape) == 2 and len(q.shape) == 2:
+        transform = torch.zeros((trans.shape[0], 4, 4), dtype=torch.float32, device='cuda')
+
+    transform[..., 0, 0] = 1 - 2 * q[..., 2] * q[..., 2] - 2 * q[..., 3] * q[..., 3]
+    transform[..., 0, 1] = 2 * q[..., 1] * q[..., 2] - 2 * q[..., 0] * q[..., 3]
+    transform[..., 0, 2] = 2 * q[..., 1] * q[..., 3] + 2 * q[..., 0] * q[..., 2]
+    transform[..., 1, 0] = 2 * q[..., 1] * q[..., 2] + 2 * q[..., 0] * q[..., 3]
+    transform[..., 1, 1] = 1 - 2 * q[..., 1] * q[..., 1] - 2 * q[..., 3] * q[..., 3]
+    transform[..., 1, 2] = 2 * q[..., 2] * q[..., 3] - 2 * q[..., 0] * q[..., 1]
+    transform[..., 2, 0] = 2 * q[..., 1] * q[..., 3] - 2 * q[..., 0] * q[..., 2]
+    transform[..., 2, 1] = 2 * q[..., 2] * q[..., 3] + 2 * q[..., 0] * q[..., 1]
+    transform[..., 2, 2] = 1 - 2 * q[..., 1] * q[..., 1] - 2 * q[..., 2] * q[..., 2]
+    transform[..., :3, 3] = trans
+    transform[..., 3, 3] = 1
     return transform
 
 
-@nvtx.annotate('get_pointcloud')
 @torch.no_grad()
 @torch.compile
 def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True, 
@@ -43,7 +48,7 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
     yy = (y_grid - CY)/FY
     xx = xx.reshape(-1)
     yy = yy.reshape(-1)
-    depth_z = depth[0].reshape(-1)
+    depth_z = depth.reshape(-1)
 
     # Initialize point cloud
     pts_cam = torch.stack((xx * depth_z, yy * depth_z, depth_z), dim=-1)
@@ -66,7 +71,7 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
     
     # Colorize point cloud
     if color is not None:
-        color = torch.permute(color, (1, 2, 0)).reshape(-1, 3) # (C, H, W) -> (H, W, C) -> (H * W, C)
+        color = color.reshape(-1, 3) # (C, H, W) -> (H, W, C) -> (H * W, C)
         point_cld = torch.cat((pts, color), -1)
 
     # Select points based on mask
@@ -79,6 +84,38 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
         return point_cld, mean3_sq_dist
     else:
         return point_cld
+
+
+@torch.no_grad()
+@torch.compile
+def get_keyframe_pointcloud(depth, intrinsics, w2c, sampled_indices):
+    CX = intrinsics[0][2]
+    CY = intrinsics[1][2]
+    FX = intrinsics[0][0]
+    FY = intrinsics[1][1]
+
+    # Compute indices of sampled pixels
+    xx = (sampled_indices[:, 1] - CX)/FX
+    yy = (sampled_indices[:, 0] - CY)/FY
+    depth_z = depth[0, sampled_indices[:, 0], sampled_indices[:, 1], 0]
+
+    # Initialize point cloud
+    pts_cam = torch.stack((xx * depth_z, yy * depth_z, depth_z), dim=-1)
+    pts4 = torch.cat([pts_cam, torch.ones_like(pts_cam[:, :1])], dim=1)
+    c2w = torch.inverse(w2c)
+    pts = (c2w @ pts4.T).T[:, :3]
+
+    # Remove points at camera origin
+    A = torch.abs(torch.round(pts, decimals=4))
+    B = torch.zeros((1, 3)).cuda().float()
+    _, idx, counts = torch.cat([A, B], dim=0).unique(
+        dim=0, return_inverse=True, return_counts=True)
+    mask = torch.isin(idx, torch.where(counts.gt(1))[0])
+    invalid_pt_idx = mask[:len(A)]
+    valid_pt_idx = ~invalid_pt_idx
+    pts = pts[valid_pt_idx]
+
+    return pts
 
 
 @torch.compile

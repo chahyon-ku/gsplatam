@@ -10,11 +10,11 @@ defaults:
 
 # gaussian
 mean_sq_dist_method: projective
-gaussian_distribution: isotropic
+gaussian_distribution: anisotropic
 
 # train
 seed: 0
-run_name: ${hydra:runtime.choices.backend@_global_}_${hydra:runtime.choices.size@_global_}${eval:'"_aniso" if "${gaussian_distribution}" == "anisotropic" else ""'}-${scene_name}-seed${seed}
+run_name: ${hydra:runtime.choices.backend@_global_}-${hydra:runtime.choices.size@_global_}-${gaussian_distribution}-${scene_name}-seed${seed}
 workdir: ./experiments/${dataset_name}
 output_dir: ${workdir}/${run_name}
 hydra:

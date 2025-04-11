@@ -5,9 +5,8 @@ import torch
 from fused_ssim import fused_ssim
 from SplaTAM.utils.slam_external import inverse_sigmoid, update_params_and_optimizer
 from SplaTAM.utils.slam_helpers import l1_loss_v1
-from SplaTAM.utils.keyframe_selection import get_pointcloud as get_keyframe_pointcloud
 
-from gsplatam.geometry import get_percent_inside
+from gsplatam.geometry import get_percent_inside, get_keyframe_pointcloud
 
 
 def remove_points(to_remove, params, optimizer):
@@ -67,7 +66,6 @@ def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, pixe
     # Back Project the selected pixels to 3D Pointcloud
     with nvtx.annotate('get_keyframe_pointcloud'):
         pts = get_keyframe_pointcloud(gt_depth, intrinsics, w2c, sampled_indices)
-        # pts = get_pointcloud(gt_depth, intrinsics, w2c, sampled_indices)
 
     viewmats = torch.stack([keyframe['est_w2c'] for keyframe in keyframe_list], dim=0)
     Ks = intrinsics[None].repeat(viewmats.shape[0], 1, 1)
@@ -200,11 +198,13 @@ def compute_loss(
     elif tracking:
         losses['im'] = torch.abs(curr_data['im'] - im).sum()
     else:
-        losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - fused_ssim(im[None], curr_data['im'][None]))
+        losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - fused_ssim(
+            torch.permute(im, (0, 3, 1, 2)),
+            torch.permute(curr_data['im'], (0, 3, 1, 2)),
+        ))
     
     losses = {k: v * loss_weights[k] for k, v in losses.items()}
     loss = sum(losses.values())
-    losses['loss'] = loss
     return loss, losses
 
 

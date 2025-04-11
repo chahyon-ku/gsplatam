@@ -26,7 +26,7 @@ def get_rendervar(
     cam_rot = params['cam_unnorm_rots'][iter_time_idx]
     cam_tran = params['cam_trans'][iter_time_idx]
 
-    viewmat = build_transform(
+    viewmats = build_transform(
         cam_tran if camera_grad else cam_tran.detach(),
         cam_rot if camera_grad else cam_rot.detach()
     )
@@ -42,7 +42,7 @@ def get_rendervar(
         'scales': torch.exp(log_scales),
         'opacities': torch.sigmoid(params['logit_opacities'][:, 0]),
         'colors': params['rgb_colors'],
-        'viewmats': viewmat[None],
+        'viewmats': viewmats,
     }
     return rendervar
 
@@ -61,10 +61,11 @@ def render_gsplat(
         camera_grad=camera_grad
     )
 
+    C = rendervar['viewmats'].shape[0]
     renders, silhouette, info = rasterization(
         **rendervar,
         render_mode='RGB+ED',
-        Ks=camera.Ks,  # [C, 3, 3]
+        Ks=torch.tile(camera.Ks, (C, 1, 1)),  # [C, 3, 3]
         width=camera.width,
         height=camera.height,
         near_plane=camera.near_plane,
@@ -74,10 +75,10 @@ def render_gsplat(
         sh_degree=None,
     )
 
-    # [C, H, W, 3] -> [3, H, W]
-    renders = renders[0].permute(2, 0, 1)
-    silhouette = silhouette[0].permute(2, 0, 1)
-    im, depth = renders[:-1], renders[-1:]
+    # [C, H, W, 3]
+    renders = renders
+    silhouette = silhouette
+    im, depth = renders[..., :-1], renders[..., -1:]
 
     return im, depth, silhouette
 
@@ -96,10 +97,19 @@ def render_gsplat_2dgs(
         camera_grad=camera_grad
     )
 
-    renders, silhouette, info = rasterization_2dgs(
+    C = rendervar['viewmats'].shape[0]
+    (
+        renders,
+        silhouette,
+        # render_normals,
+        # render_normals_from_depth,
+        # render_distort,
+        # render_median,
+        info
+    ) = rasterization_2dgs(
         **rendervar,
         render_mode='RGB+ED',
-        Ks=camera.Ks,  # [C, 3, 3]
+        Ks=torch.tile(camera.Ks, (C, 1, 1)),  # [C, 3, 3]
         width=camera.width,
         height=camera.height,
         near_plane=camera.near_plane,
@@ -109,10 +119,10 @@ def render_gsplat_2dgs(
         sh_degree=None,
     )
 
-    # [C, H, W, 3] -> [3, H, W]
-    renders = renders[0].permute(2, 0, 1)
-    silhouette = silhouette[0].permute(2, 0, 1)
-    im, depth = renders[:-1], renders[-1:]
+    # [C, H, W, 3]
+    renders = renders
+    silhouette = silhouette
+    im, depth = renders[..., :-1], renders[..., -1:]
 
     return im, depth, silhouette
 

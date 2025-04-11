@@ -4,3 +4,6 @@
 [submodule "third_party/fused-ssim"]
 	path = third_party/fused-ssim
 	url = https://github.com/rahul-goel/fused-ssim.git
+[submodule "third_party/gsplat"]
+	path = third_party/gsplat
+	url = https://github.com/chahyon-ku/gsplat-2dgs_v_viewmats/

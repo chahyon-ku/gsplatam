@@ -116,7 +116,7 @@ def track_frame(
                 render_fn,
                 params,
                 curr_data,
-                time_idx,
+                [time_idx],
                 config['tracking']['loss_weights'],
                 config['tracking']['use_sil_for_loss'],
                 config['tracking']['sil_thres'],
@@ -196,7 +196,7 @@ def densify_frame(
         'w2c': first_frame_w2c,
         'iter_gt_w2c_list': gt_w2c_all_frames
     }
-    im, depth, silhouette = render_fn(curr_data['cam'], params, time_idx, False, False)
+    im, depth, silhouette = render_fn(curr_data['cam'], params, [time_idx], False, False)
     
     non_presence_mask = get_non_presence_mask(curr_data['depth'][0], depth, silhouette, config['mapping']['sil_thres'])
 
@@ -215,6 +215,105 @@ def densify_frame(
             params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
 
     return params, optimizer
+
+
+def map_frame_batched(
+    config,
+    render_fn,
+    params,
+    variables,
+    mapping_optimizer,
+    time_idx,
+    color,
+    depth,
+    mapping_cam,
+    first_frame_w2c,
+    gt_w2c_all_frames,
+    keyframe_list
+):
+    with nvtx.annotate(f'keyframe selection'):
+        with torch.no_grad():
+            # Get the current estimated rotation & translation
+            curr_w2c = build_transform(
+                params['cam_trans'][time_idx].detach(),
+                params['cam_unnorm_rots'][time_idx].detach()
+            )
+            # Select Keyframes for Mapping
+            num_keyframes = config['mapping_window_size']-2
+            selected_keyframes = keyframe_selection_overlap(depth, curr_w2c, mapping_cam.Ks[0], keyframe_list[:-1], num_keyframes)
+            if len(keyframe_list) > 0:
+                selected_keyframes.append(len(keyframe_list) - 1)
+                color = [keyframe_list[idx]['color'] for idx in selected_keyframes] + [color]
+                depth = [keyframe_list[idx]['depth'] for idx in selected_keyframes] + [depth]
+                time_idx = [keyframe_list[idx]['id'] for idx in selected_keyframes] + [time_idx]
+            else:
+                time_idx = [time_idx]
+                color = [color]
+                depth = [depth]
+            
+            while len(time_idx) < config['mapping_window_size']:
+                time_idx.append(time_idx[-1])
+                color.append(color[-1])
+                depth.append(depth[-1])
+
+            # random permute
+            order = np.random.permutation(len(time_idx))
+            time_idx = [time_idx[i] for i in order]
+            color = [color[i] for i in order]
+            depth = [depth[i] for i in order]
+            
+            color = torch.cat(color, dim=0)
+            depth = torch.cat(depth, dim=0)
+
+    # Mapping
+    mapping_iter_time_sum = 0
+    mapping_iter_time_count = 0
+    mapping_start_time = time.time()
+    batch_size = 1
+    for iter in range(config['mapping']['num_iters'] // batch_size):
+        iter_start_time = time.time()
+
+        # iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
+        iter_data = {
+            'cam': mapping_cam,
+            'im': color[batch_size * iter:batch_size * (iter + 1)],
+            'depth': depth[batch_size * iter:batch_size * (iter + 1)],
+            'id': time_idx[batch_size * iter:batch_size * (iter + 1)],# 'intrinsics': intrinsics,
+            'w2c': first_frame_w2c,
+            # 'iter_gt_w2c_list': gt_w2c_all_frames
+        }
+        # Loss for current frame
+        loss, losses = get_loss(
+            render_fn,
+            params,
+            iter_data,
+            iter_data['id'],
+            config['mapping']['loss_weights'],
+            config['mapping']['use_sil_for_loss'],
+            config['mapping']['sil_thres'],
+            config['mapping']['use_l1'],
+            config['mapping']['ignore_outlier_depth_loss'],
+            mapping=True,
+        )
+        # Backprop
+        with nvtx.annotate(f'backprop'):
+            loss.backward()
+        with torch.no_grad():
+            # Prune Gaussians
+            if config['mapping']['prune_gaussians']:
+                params = prune_gaussians(params, variables, mapping_optimizer, iter, config['mapping']['pruning_dict'])
+            # Optimizer Update
+            with nvtx.annotate(f'optimizer step'):
+                mapping_optimizer.step()
+            mapping_optimizer.zero_grad(set_to_none=True)
+        # Update the runtime numbers
+        iter_end_time = time.time()
+        mapping_iter_time_sum += iter_end_time - iter_start_time
+        mapping_iter_time_count += 1
+    # Update the runtime numbers
+    mapping_end_time = time.time()
+
+    return mapping_iter_time_sum, mapping_iter_time_count, mapping_end_time - mapping_start_time, 1
 
 
 def map_frame(
@@ -283,7 +382,7 @@ def map_frame(
             render_fn,
             params,
             iter_data,
-            iter_time_idx,
+            [iter_time_idx],
             config['mapping']['loss_weights'],
             config['mapping']['use_sil_for_loss'],
             config['mapping']['sil_thres'],
@@ -381,14 +480,14 @@ def rgbd_slam(config: dict):
         # Load RGBD frames incrementally instead of all frames
         with nvtx.annotate('dataset[time_idx]'):
             color, depth, _, gt_pose = next(dataloader_iter)
-            color = color[0].to(device)
-            depth = depth[0].to(device)
-            gt_pose = gt_pose[0].to(device)
+            color = color.to(device)
+            depth = depth.to(device)
+            gt_pose = gt_pose.to(device)
         # Process poses
         gt_w2c = torch.linalg.inv(gt_pose)
         # Process RGB-D Data
-        color = color.permute(2, 0, 1) / 255
-        depth = depth.permute(2, 0, 1)
+        color = color / 255
+        depth = depth
         gt_w2c_all_frames.append(gt_w2c)
 
         time_idx_tqdm.set_postfix_str(f'num_gaussians: {params['means3D'].shape[0]}')
