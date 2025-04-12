@@ -5,7 +5,7 @@ do
     do
         for gaussian_distribution in anisotropic isotropic
         do
-            nsys profile python scripts/train.py\
+            python scripts/train.py\
                 backend@_global_=$backend\
                 size@_global_=$size\
                 gaussian_distribution=$gaussian_distribution\

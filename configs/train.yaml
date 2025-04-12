@@ -10,7 +10,7 @@ defaults:
 
 # gaussian
 mean_sq_dist_method: projective
-gaussian_distribution: anisotropic
+gaussian_distribution: isotropic
 
 # train
 seed: 0

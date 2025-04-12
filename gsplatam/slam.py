@@ -67,6 +67,9 @@ def initialize_camera_pose(params, time_idx, forward_prop):
         prev_tran2 = params['cam_trans'][time_idx-2].detach()
         new_tran = prev_tran1 + (prev_tran1 - prev_tran2)
         params['cam_trans'][time_idx] = new_tran.detach()
+
+        # params['cam_unnorm_rots'][time_idx] = params['cam_unnorm_rots'][time_idx-1].detach()
+        # params['cam_trans'][time_idx] = params['cam_trans'][time_idx-1].detach()
     else:
         # Initialize the camera pose for the current frame
         params['cam_unnorm_rots'][time_idx] = params['cam_unnorm_rots'][time_idx-1].detach()

@@ -1,6 +1,5 @@
 import os
 from threading import Thread
-from SplaTAM.datasets.gradslam_datasets.geometryutils import relative_transformation
 import cv2
 import numpy as np
 import torch
@@ -80,7 +79,7 @@ def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_
 def eval(
     render_fn,
     dataset, final_params, num_frames, eval_dir, sil_thres, 
-    mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1, save_frames=False
+    mapping_iters, add_new_gaussians, wandb_run=None, save_qual=False, eval_every=1, save_frames=False
 ):
     print("Evaluating Final Parameters ...")
     psnr_list = []
@@ -111,7 +110,8 @@ def eval(
 
     gt_w2c_list = []
     threads = []
-    for time_idx in tqdm(range(num_frames)):
+    # for time_idx in tqdm(range(num_frames)):
+    for time_idx in range(num_frames):
          # Get RGB-D Data & Camera Parameters
         # color, depth, intrinsics, pose = dataset[time_idx]
         color, depth, intrinsics, pose = next(dataloader_iter)
@@ -209,21 +209,15 @@ def eval(
         fig_title = "Time Step: {}".format(time_idx)
         plot_name = "%04d" % time_idx
         presence_sil_mask = presence_sil_mask.detach().cpu().numpy()
-        if wandb_run is None:
-            threads.append(Thread(target=plot_rgbd_silhouette,
-                   args=(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
-                         psnr, depth_l1, fig_title, plot_dir, plot_name, True)
-            ))
-            threads[-1].start()
-            # plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
-            #                      psnr, depth_l1, fig_title, plot_dir, 
-            #                      plot_name=plot_name, save_plot=True)
-        elif wandb_save_qual:
-            plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
-                                 psnr, depth_l1, fig_title, plot_dir, 
-                                 plot_name=plot_name, save_plot=True,
-                                 wandb_run=wandb_run, wandb_step=None, 
-                                 wandb_title="Eval/Qual Viz")
+        threads.append(Thread(target=plot_rgbd_silhouette,
+                args=(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
+                        psnr, depth_l1, fig_title, plot_dir, plot_name, True)
+        ))
+        threads[-1].start()
+        # plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
+        #                      psnr, depth_l1, fig_title, plot_dir, 
+        #                      plot_name=plot_name, save_plot=True)
+
     [t.join() for t in threads]
 
     # Compute the final ATE RMSE

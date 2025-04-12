@@ -51,18 +51,21 @@ def lines_to_metrics(lines):
 
 if __name__ == '__main__':
     datasets = ['replica', 'tum']
-    backends = ['orig', 'gsplat']
+    backends = ['orig', 'gsplat', 'gsplat_2dgs']
     sizes = ['tum', 'base', 'small', 'tiny']
     backend_names = {
         'orig': 'reproduced',
         'gsplat': 'ours',
+        'gsplat_2dgs': 'ours (2D)',
     }
 
     for dataset in datasets:
         table = []
         for size in sizes:
             for backend in backends:
+                # for gaussian in ['isotropic', 'anisotropic']:
                 path = f'logs-aniso/{backend}_{size}-{dataset}.log'
+                # path = f'logs-gs/{dataset}-{backend}-{gaussian}-{size}.log'
                 if not os.path.exists(path):
                     continue
                 

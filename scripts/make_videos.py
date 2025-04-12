@@ -27,18 +27,16 @@ if __name__ == '__main__':
     datasets = ['replica']
     backends = ['gsplat']
     sizes = ['tiny']
-    dataset_paths = {
-        'replica': 'experiments/Replica/{backend}_{size}-room0-seed0/eval/plots/*.png',
-    }
+    image_dirs = [
+        # 'experiments/Replica/gsplat-tiny-isotropic-room0-seed0',
+        'experiments/TUM/gsplat-tiny-isotropic-freiburg1_desk-seed0',
+    ]
 
     os.makedirs('videos', exist_ok=True)
-    for dataset in datasets:
-        table = []
-        for size in sizes:
-            for backend in backends:
-                image_paths = natsorted(glob(dataset_paths[dataset].format(backend=backend, size=size)))
-                if len(image_paths):
-                    with imageio.get_writer('videos/' + f'{dataset}-{backend}_{size}.mp4', fps=30) as writer:
-                        for image_path in tqdm(image_paths, desc=f'Creating {dataset}-{backend}_{size}.mp4'):
-                            image = imageio.imread(image_path)
-                            writer.append_data(image[:, :image.shape[1] * 2 // 3, :])
+    for image_dir in image_dirs:
+        video_path = os.path.join(f'videos/{os.path.basename(image_dir)}.mp4')
+        image_paths = natsorted(glob(f'{image_dir}/eval/plots/*.png'))
+        with imageio.get_writer(video_path, fps=30) as writer:
+            for image_path in tqdm(image_paths, desc=f'Creating {video_path}.mp4'):
+                image = imageio.imread(image_path)
+                writer.append_data(image[:, :image.shape[1] * 2 // 3, :])

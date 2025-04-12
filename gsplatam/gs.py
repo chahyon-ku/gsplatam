@@ -2,7 +2,7 @@ import numpy as np
 import nvtx
 import torch
 
-from fused_ssim import fused_ssim
+from fused_ssim import fused_ssim, FusedSSIMMap
 from SplaTAM.utils.slam_external import inverse_sigmoid, update_params_and_optimizer
 from SplaTAM.utils.slam_helpers import l1_loss_v1
 
@@ -195,6 +195,21 @@ def compute_loss(
     # RGB Loss
     if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
         losses['im'] = (torch.abs(curr_data['im'] - im) * mask).sum()
+        # data_im = curr_data['im'] * mask
+        # im = im * mask
+        # C1 = 0.01 ** 2
+        # C2 = 0.03 ** 2
+        # losses['im'] = (
+        #     0.8 * torch.abs(im - data_im).sum()
+        #     + 0.2 * (1.0 - (FusedSSIMMap.apply(
+        #         C1,
+        #         C2,
+        #         torch.permute(im, (0, 3, 1, 2)),
+        #         torch.permute(data_im, (0, 3, 1, 2)),
+        #         'same',
+        #         True
+        #     ).permute(0, 2, 3, 1) * mask).sum() / mask.sum())
+        # )
     elif tracking:
         losses['im'] = torch.abs(curr_data['im'] - im).sum()
     else:
