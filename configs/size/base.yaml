@@ -6,4 +6,4 @@ mapping_iters: 60
 
 tracking_factor: 1
 mapping_factor: 1
-densify_factor: 1
+densify_factor: ${eval:'2 if ("${dataset_name}" == "Replica" and "${hydra:runtime.choices.backend@_global_}".startswith("gsplat")) else 1'}

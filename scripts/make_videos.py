@@ -24,13 +24,11 @@ if __name__ == '__main__':
     }
 
     # default
-    datasets = ['replica']
-    backends = ['gsplat']
-    sizes = ['tiny']
     image_dirs = [
         # 'experiments/Replica/gsplat-tiny-isotropic-room0-seed0',
-        'experiments/TUM/gsplat-tiny-isotropic-freiburg1_desk-seed0',
+        'experiments/TUM/gsplat-small-isotropic-freiburg1_desk-seed0',
     ]
+    image_dirs = glob('experiments/*/*')
 
     os.makedirs('videos', exist_ok=True)
     for image_dir in image_dirs:

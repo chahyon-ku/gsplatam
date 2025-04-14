@@ -195,31 +195,27 @@ def compute_loss(
     # RGB Loss
     if tracking and (use_sil_for_loss or ignore_outlier_depth_loss):
         losses['im'] = (torch.abs(curr_data['im'] - im) * mask).sum()
-        # data_im = curr_data['im'] * mask
-        # im = im * mask
         # C1 = 0.01 ** 2
         # C2 = 0.03 ** 2
         # losses['im'] = (
-        #     0.8 * torch.abs(im - data_im).sum()
-        #     + 0.2 * (1.0 - (FusedSSIMMap.apply(
+        #     (torch.abs(curr_data['im'] - im) * mask).sum()
+        #     - 0.00001 * (FusedSSIMMap.apply(
         #         C1,
         #         C2,
-        #         torch.permute(im, (0, 3, 1, 2)),
-        #         torch.permute(data_im, (0, 3, 1, 2)),
+        #         im[None],
+        #         curr_data['im'][None],
         #         'same',
         #         True
-        #     ).permute(0, 2, 3, 1) * mask).sum() / mask.sum())
+        #     ) * mask[None]).sum()
         # )
     elif tracking:
         losses['im'] = torch.abs(curr_data['im'] - im).sum()
     else:
-        losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - fused_ssim(
-            torch.permute(im, (0, 3, 1, 2)),
-            torch.permute(curr_data['im'], (0, 3, 1, 2)),
-        ))
+        losses['im'] = 0.8 * l1_loss_v1(im, curr_data['im']) + 0.2 * (1.0 - fused_ssim(im[None], curr_data['im'][None]))
     
     losses = {k: v * loss_weights[k] for k, v in losses.items()}
     loss = sum(losses.values())
+    losses['loss'] = loss
     return loss, losses
 
 

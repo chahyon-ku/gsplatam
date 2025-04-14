@@ -79,7 +79,7 @@ def plot_rgbd_silhouette(color, depth, rastered_color, rastered_depth, presence_
 def eval(
     render_fn,
     dataset, final_params, num_frames, eval_dir, sil_thres, 
-    mapping_iters, add_new_gaussians, wandb_run=None, save_qual=False, eval_every=1, save_frames=False
+    mapping_iters, add_new_gaussians, wandb_run=None, wandb_save_qual=False, eval_every=1, save_frames=False
 ):
     print("Evaluating Final Parameters ...")
     psnr_list = []
@@ -113,12 +113,11 @@ def eval(
     # for time_idx in tqdm(range(num_frames)):
     for time_idx in range(num_frames):
          # Get RGB-D Data & Camera Parameters
-        # color, depth, intrinsics, pose = dataset[time_idx]
         color, depth, intrinsics, pose = next(dataloader_iter)
         color, depth, intrinsics, pose = color[0].cuda(), depth[0].cuda(), intrinsics[0].cuda(), pose[0].cuda()
         gt_w2c = torch.linalg.inv(pose)
         gt_w2c_list.append(gt_w2c)
-        intrinsics = intrinsics[None, :3, :3]
+        intrinsics = intrinsics[:3, :3]
 
         # Process RGB-D Data
         color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
@@ -128,7 +127,7 @@ def eval(
             # Process Camera Parameters
             first_frame_w2c = torch.linalg.inv(pose)
             # Setup Camera
-            cam = Camera(intrinsics, color.shape[2], color.shape[1])
+            cam = Camera(intrinsics[None], color.shape[2], color.shape[1])
         
         # Skip frames if not eval_every
         if time_idx != 0 and (time_idx+1) % eval_every != 0:
@@ -138,10 +137,7 @@ def eval(
         curr_data = {'cam': cam, 'im': color, 'depth': depth, 'id': time_idx, 'w2c': first_frame_w2c}
 
         # Render Depth & Silhouette
-        im, rastered_depth, silhouette = render_fn(cam, final_params, [time_idx], False, False)
-        im = im[0].permute(2, 0, 1)
-        rastered_depth = rastered_depth[0].permute(2, 0, 1)
-        silhouette = silhouette[0].permute(2, 0, 1)
+        im, rastered_depth, silhouette = render_fn(cam, final_params, time_idx, False, False)
         # Mask invalid depth in GT
         valid_depth_mask = (curr_data['depth'] > 0)
         rastered_depth_viz = rastered_depth.detach()
@@ -155,7 +151,6 @@ def eval(
         else:
             weighted_im = im * valid_depth_mask
             weighted_gt_im = curr_data['im'] * valid_depth_mask
-
         psnr = calc_psnr(weighted_im, weighted_gt_im).mean()
         ssim = ms_ssim(weighted_im.unsqueeze(0).cpu(), weighted_gt_im.unsqueeze(0).cpu(), 
                         data_range=1.0, size_average=True)
@@ -209,15 +204,21 @@ def eval(
         fig_title = "Time Step: {}".format(time_idx)
         plot_name = "%04d" % time_idx
         presence_sil_mask = presence_sil_mask.detach().cpu().numpy()
-        threads.append(Thread(target=plot_rgbd_silhouette,
-                args=(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
-                        psnr, depth_l1, fig_title, plot_dir, plot_name, True)
-        ))
-        threads[-1].start()
-        # plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
-        #                      psnr, depth_l1, fig_title, plot_dir, 
-        #                      plot_name=plot_name, save_plot=True)
-
+        if wandb_run is None:
+            threads.append(Thread(target=plot_rgbd_silhouette,
+                   args=(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
+                         psnr, depth_l1, fig_title, plot_dir, plot_name, True)
+            ))
+            threads[-1].start()
+            # plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
+            #                      psnr, depth_l1, fig_title, plot_dir, 
+            #                      plot_name=plot_name, save_plot=True)
+        elif wandb_save_qual:
+            plot_rgbd_silhouette(color, depth, im, rastered_depth_viz, presence_sil_mask, diff_depth_l1,
+                                 psnr, depth_l1, fig_title, plot_dir, 
+                                 plot_name=plot_name, save_plot=True,
+                                 wandb_run=wandb_run, wandb_step=None, 
+                                 wandb_title="Eval/Qual Viz")
     [t.join() for t in threads]
 
     # Compute the final ATE RMSE
