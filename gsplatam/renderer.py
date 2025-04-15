@@ -124,3 +124,4 @@ def get_render_fn(type: str):
         return render_gsplat_2dgs
     else:
         raise ValueError(f"Unknown renderer type: {type}")
+

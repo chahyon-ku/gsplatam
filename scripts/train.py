@@ -9,15 +9,19 @@ OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 @hydra.main(version_base=None, config_path='../configs', config_name='train')
 def train(config: DictConfig) -> None:
-    os.makedirs('logs', exist_ok=True)
-    if os.path.exists(f'logs/{config.run_name}.log'):
-        print(f'logs/{config.run_name}.log already exists, please remove it first.')
-        return
+    if config.viewer:
+        seed_everything(seed=config['seed'])
+        hydra.utils.instantiate(config.backend, config, _recursive_=False)
+    else:
+        os.makedirs('logs', exist_ok=True)
+        if os.path.exists(f'logs/{config.run_name}.log'):
+            print(f'logs/{config.run_name}.log already exists, please remove it first.')
+            return
 
-    with open(f'logs/{config.run_name}.log', 'w') as f:
-        with redirect_stdout(f), redirect_stderr(f):
-            seed_everything(seed=config['seed'])
-            hydra.utils.instantiate(config.backend, config, _recursive_=False)
+        with open(f'logs/{config.run_name}.log', 'w') as f:
+            with redirect_stdout(f), redirect_stderr(f):
+                seed_everything(seed=config['seed'])
+                hydra.utils.instantiate(config.backend, config, _recursive_=False)
 
 
 if __name__ == "__main__":

@@ -28,13 +28,15 @@ if __name__ == '__main__':
         # 'experiments/Replica/gsplat-tiny-isotropic-room0-seed0',
         'experiments/TUM/gsplat-small-isotropic-freiburg1_desk-seed0',
     ]
-    image_dirs = glob('experiments/*/*')
+    image_dirs = glob('experiments/*/orig_*')
 
     os.makedirs('videos', exist_ok=True)
     for image_dir in image_dirs:
         video_path = os.path.join(f'videos/{os.path.basename(image_dir)}.mp4')
         image_paths = natsorted(glob(f'{image_dir}/eval/plots/*.png'))
-        with imageio.get_writer(video_path, fps=30) as writer:
-            for image_path in tqdm(image_paths, desc=f'Creating {video_path}.mp4'):
-                image = imageio.imread(image_path)
-                writer.append_data(image[:, :image.shape[1] * 2 // 3, :])
+        if not os.path.exists(video_path):
+            print(f'Creating {video_path}.mp4')
+            with imageio.get_writer(video_path, fps=30) as writer:
+                for image_path in tqdm(image_paths, desc=f'Creating {video_path}.mp4'):
+                    image = imageio.imread(image_path)
+                    writer.append_data(image[:, :image.shape[1] * 2 // 3, :])

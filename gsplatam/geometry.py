@@ -82,7 +82,7 @@ def get_pointcloud(color, depth, intrinsics, w2c, transform_pts=True,
 
 
 @torch.no_grad()
-@torch.compile
+# @torch.compile
 def get_keyframe_pointcloud(depth, intrinsics, w2c, sampled_indices):
     CX = intrinsics[0][2]
     CY = intrinsics[1][2]

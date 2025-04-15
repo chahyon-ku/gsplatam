@@ -22,11 +22,14 @@ mamba create -n gsplatam -c pytorch -c nvidia\
     pytorch=2.4.0 torchvision=0.19.0 torchaudio=2.4.0 pytorch-cuda=12.1\
     tqdm opencv imageio matplotlib kornia natsort pyyaml wandb lpips torchmetrics\
     pytorch-msssim plyfile nvtx plotly ipykernel opencv rich hydra-core\
-    dash scikit-learn addict pandas
+    dash scikit-learn addict pandas\
+    websockets msgspec tyro jaxtyping
 mamba activate gsplatam
 pip install --no-deps\
     open3d\
-    gsplat==1.4
+    gsplat==1.4\
+    viser==0.02\
+    nerfview
 pip install --no-deps -e\
     ./third_party/splatam\
     ./third_party/splatam/SplaTAM/diff-gaussian-rasterization-w-depth.git
@@ -60,17 +63,6 @@ nsys profile --wait primary -o $backend\_$size-$data --force-overwrite true\
 
 ## Demo
 ```bash
-sudo sysctl -w net.core.rmem_max=100000000
-mkdir -p third_party/cyclonedds/build third_party/cyclonedds/install
-cd third_party/cyclonedds/build
-cmake .. -DCMAKE_INSTALL_PREFIX=../install
-cmake --build . --config RelWithDebInfo --target install
-export CYCLONEDDS_HOME="$(pwd)/../install"
-pip install git+https://github.com/eclipse-cyclonedds/cyclonedds-python
-cd -
-mamba install aiohttp av pyee cffi cryptography pyopenssl aioice google-crc32c
-pip install --no-deps -e third_party/aiortc
-pip install --no-deps pylibsrtp
 
 python scripts/iphone_demo_live.py
 ```

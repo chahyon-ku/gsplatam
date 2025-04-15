@@ -1,0 +1,24 @@
+defaults:
+ - data@_global_: replica
+ - eval@_global_: base
+ - tracking: base
+ - mapping: base
+ - viz: base
+ - size@_global_: tiny
+ - backend@_global_: gsplat
+ - _self_
+
+# gaussian
+mean_sq_dist_method: projective
+gaussian_distribution: anisotropic
+
+# train
+seed: 0
+run_name: ${hydra:runtime.choices.backend@_global_}-${hydra:runtime.choices.size@_global_}-${gaussian_distribution}-${scene_name}-seed${seed}
+workdir: ./experiments/${dataset_name}
+output_dir: ${workdir}/${run_name}
+hydra:
+  run:
+    dir: ${output_dir}
+primary_device: 'cuda'
+load_checkpoint: False

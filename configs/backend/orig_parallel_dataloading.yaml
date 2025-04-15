@@ -1,2 +1,2 @@
 backend:
-  _target_: SplaTAM.scripts.splatam_parallel_dataloading.rgbd_slam
+  _target_: gsplatam.ablations.02_splatam_parallel_dataloading.rgbd_slam

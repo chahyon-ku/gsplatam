@@ -22,3 +22,5 @@ hydra:
     dir: ${output_dir}
 primary_device: 'cuda'
 load_checkpoint: False
+
+viewer: False

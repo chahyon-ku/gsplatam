@@ -61,12 +61,14 @@ if __name__ == '__main__':
     }
 
     for dir in ['logs-ba', 'logs-noba']:
+    # for dir in ['logs-ba']:
         for dataset in ['room0-seed0', 'freiburg1_desk-seed0']:
             for gaussian in ['isotropic', 'anisotropic']:
+            # for gaussian in ['anisotropic']:
                 print(dir, gaussian, dataset)
                 table = []
                 for size in ['tum', 'base', 'small', 'tiny']:
-                    for backend in backends:
+                    for backend in ['gsplat']:
                         # path = f'logs-aniso/{backend}_{size}-{dataset}.log'
                         path = f'{dir}/{backend}-{size}-{gaussian}-{dataset}.log'
                         if not os.path.exists(path):
@@ -79,3 +81,24 @@ if __name__ == '__main__':
                         table.append(f'{size} & {backend_names[backend]} & {metrics["track_time"]:.2f} & {metrics["map_time"]:.2f} & {metrics["total_time"]:.2f} & {metrics["num_gaussians"]:,} & {metrics["ate_rmse"]:.2f} & {metrics["psnr"]:.2f} & {metrics["depth_l1"]:.2f} \\\\')
                 print('\n'.join(table))
                 print()
+
+
+    for dir in ['logs-ba']:#, 'logs-noba']:
+        for dataset in ['room0-seed0']:
+            print(dir, gaussian, dataset)
+            table = []
+            for backend in ['gsplat', 'gsplat_2dgs']:
+                for gaussian in ['isotropic', 'anisotropic']:
+                    for size in ['tiny']:
+                        # path = f'logs-aniso/{backend}_{size}-{dataset}.log'
+                        path = f'{dir}/{backend}-{size}-{gaussian}-{dataset}.log'
+                        if not os.path.exists(path):
+                            continue
+                        
+                        with open(path, 'r') as f:
+                            lines = f.readlines()
+                        metrics = lines_to_metrics(lines)
+
+                        table.append(f'{size} & {backend_names[backend]} & {metrics["track_time"]:.2f} & {metrics["map_time"]:.2f} & {metrics["total_time"]:.2f} & {metrics["num_gaussians"]:,} & {metrics["ate_rmse"]:.2f} & {metrics["psnr"]:.2f} & {metrics["depth_l1"]:.2f} \\\\')
+            print('\n'.join(table))
+            print()

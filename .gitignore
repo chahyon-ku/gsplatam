@@ -1,5 +1,6 @@
 /data
 /logs
+/videos
 /experiments*
 /wandb
 /third_party

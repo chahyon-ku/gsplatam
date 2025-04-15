@@ -1,15 +1,18 @@
 import os
 import time
+from typing import Tuple
+from gsplat.rendering import rasterization
 import hydra
 import nvtx
 import torch
 import torch.nn.functional as F
 import numpy as np
+import viser
+import nerfview
 from torch.utils.data import DataLoader
 from tqdm import tqdm
 
-from SplaTAM.utils.common_utils import save_params_ckpt, save_params
-from SplaTAM.utils.slam_helpers import matrix_to_quaternion
+from SplaTAM.utils.common_utils import save_params
 
 from gsplatam.eval import eval
 from gsplatam.geometry import build_transform, get_pointcloud
@@ -17,18 +20,19 @@ from gsplatam.gs import get_loss, get_non_presence_mask, initialize_new_params, 
 from gsplatam.renderer import Camera
 
 
-def initialize_first_timestep(dataset, num_frames, scene_radius_depth_ratio, 
-                              mean_sq_dist_method, densify_factor, gaussian_distribution):
-    # Get RGB-D Data & Camera Parameters
-    color, depth, intrinsics, pose = dataset[0]
-
-    # Process RGB-D Data
-    color = color.permute(2, 0, 1) / 255 # (H, W, C) -> (C, H, W)
-    depth = depth.permute(2, 0, 1) # (H, W, C) -> (C, H, W)
-    
-    # Process Camera Parameters
-    intrinsics = intrinsics[:3, :3]
-    w2c = torch.linalg.inv(pose)
+def initialize_first_timestep(
+    # dataset,
+    color,      # (C, H, W)
+    depth,      # (C, H, W)
+    intrinsics, # (3, 3)
+    w2c,       # (4, 4)
+    #
+    num_frames,
+    scene_radius_depth_ratio, 
+    densify_factor,
+    mean_sq_dist_method,
+    gaussian_distribution,
+):
 
     # Setup Camera
     cam = Camera(intrinsics[None], color.shape[2], color.shape[1])
@@ -74,8 +78,6 @@ def initialize_camera_pose(params, time_idx, forward_prop):
         # Initialize the camera pose for the current frame
         params['cam_unnorm_rots'][time_idx] = params['cam_unnorm_rots'][time_idx-1].detach()
         params['cam_trans'][time_idx] = params['cam_trans'][time_idx-1].detach()
-    
-    return params
 
 
 def track_frame(
@@ -86,10 +88,15 @@ def track_frame(
     time_idx,
     color,
     depth,
-    tracking_cam,
+    cam,
     first_frame_w2c,
-    gt_w2c_all_frames,
+    # gt_w2c_all_frames,
 ):
+    tracking_cam = Camera(
+        cam.Ks * color.shape[1] / cam.height,
+        color.shape[2],
+        color.shape[1]
+    )
     tracking_iter_time_sum = 0
     tracking_iter_time_count = 0
     tracking_start_time = time.time()
@@ -97,11 +104,11 @@ def track_frame(
     if time_idx > 0 and not config['tracking']['use_gt_poses']:
         curr_data = {
             'cam': tracking_cam,
-            'im': color[:, ::config['tracking_factor'], ::config['tracking_factor']],
-            'depth': depth[:, ::config['tracking_factor'], ::config['tracking_factor']],
+            'im': color,
+            'depth': depth,
             'id': time_idx,
             'w2c': first_frame_w2c,
-            'iter_gt_w2c_list': gt_w2c_all_frames
+            # 'iter_gt_w2c_list': gt_w2c_all_frames
         }
 
         # Reset Optimizer & Learning Rates for tracking
@@ -160,45 +167,39 @@ def track_frame(
         with torch.no_grad():
             params['cam_unnorm_rots'][[time_idx]] = candidate_cam_unnorm_rot
             params['cam_trans'][[time_idx]] = candidate_cam_tran
-    elif time_idx > 0 and config['tracking']['use_gt_poses']:
-        with torch.no_grad():
-            # Get the ground truth pose relative to frame 0
-            rel_w2c = gt_w2c_all_frames[-1]
-            rel_w2c_rot = rel_w2c[:3, :3].unsqueeze(0).detach()
-            rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
-            rel_w2c_tran = rel_w2c[:3, 3].detach()
-            # Update the camera parameters
-            params['cam_unnorm_rots'][[time_idx]] = rel_w2c_rot_quat
-            params['cam_trans'][[time_idx]] = rel_w2c_tran
-    # Update the runtime numbers
     tracking_end_time = time.time()
-    return tracking_iter_time_sum, tracking_iter_time_count, tracking_end_time - tracking_start_time, 1, loss
+    return tracking_iter_time_sum, tracking_iter_time_count, tracking_end_time - tracking_start_time, 1, loss.cpu()
 
 
 @torch.no_grad()
 def densify_frame(
     config,
     render_fn,
-    params, 
-    optimizer,
+    params,
     time_idx,
     color,
     depth,
-    densify_cam,
+    cam,
     first_frame_w2c,
-    gt_w2c_all_frames,
+    # gt_w2c_all_frames,
     # sil_thres, 
     # mean_sq_dist_method,
     # gaussian_distribution
 ):
+    densify_cam = Camera(
+        cam.Ks * color.shape[1] / cam.height,
+        color.shape[2],
+        color.shape[1]
+    )
+
     # RGB, Depth, and Silhouette Rendering
     curr_data = {
         'cam': densify_cam,
-        'im': color[:, ::config['densify_factor'], ::config['densify_factor']],
-        'depth': depth[:, ::config['densify_factor'], ::config['densify_factor']],
+        'im': color,
+        'depth': depth,
         'id': time_idx,
         'w2c': first_frame_w2c,
-        'iter_gt_w2c_list': gt_w2c_all_frames
+        # 'iter_gt_w2c_list': gt_w2c_all_frames
     }
     im, depth, silhouette = render_fn(curr_data['cam'], params, time_idx, False, False)
     
@@ -218,7 +219,7 @@ def densify_frame(
         for k, v in new_params.items():
             params[k] = torch.nn.Parameter(torch.cat((params[k], v), dim=0).requires_grad_(True))
 
-    return params, optimizer
+    return params
 
 
 def map_frame(
@@ -230,13 +231,18 @@ def map_frame(
     time_idx,
     color,
     depth,
-    mapping_cam,
+    cam,
     first_frame_w2c,
-    gt_w2c_all_frames,
+    # gt_w2c_all_frames,
     keyframe_list
 ):
     with nvtx.annotate(f'keyframe selection'):
         with torch.no_grad():
+            mapping_cam = Camera(
+                cam.Ks * color.shape[1] / cam.height,
+                color.shape[2],
+                color.shape[1]
+            )
             # Get the current estimated rotation & translation
             curr_w2c = build_transform(
                 params['cam_trans'][time_idx].detach(),
@@ -274,14 +280,19 @@ def map_frame(
             iter_time_idx = keyframe_list[selected_rand_keyframe_idx]['id']
             iter_color = keyframe_list[selected_rand_keyframe_idx]['color']
             iter_depth = keyframe_list[selected_rand_keyframe_idx]['depth']
-        iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
+        # iter_gt_w2c = gt_w2c_all_frames[:iter_time_idx+1]
+        mapping_cam = Camera(
+            cam.Ks * iter_color.shape[1] / cam.height,
+            iter_color.shape[2],
+            iter_color.shape[1]
+        )
         iter_data = {
             'cam': mapping_cam,
             'im': iter_color,
             'depth': iter_depth,
             'id': iter_time_idx,# 'intrinsics': intrinsics,
             'w2c': first_frame_w2c,
-            'iter_gt_w2c_list': iter_gt_w2c
+            # 'iter_gt_w2c_list': iter_gt_w2c
         }
         # Loss for current frame
         loss, losses = get_loss(
@@ -303,7 +314,7 @@ def map_frame(
         with torch.no_grad():
             # Prune Gaussians
             if config['mapping']['prune_gaussians']:
-                params = prune_gaussians(params, variables, mapping_optimizer, iter, config['mapping']['pruning_dict'])
+                prune_gaussians(params, variables, mapping_optimizer, iter, config['mapping']['pruning_dict'])
             # Optimizer Update
             with nvtx.annotate(f'optimizer step'):
                 mapping_optimizer.step()
@@ -315,7 +326,101 @@ def map_frame(
     # Update the runtime numbers
     mapping_end_time = time.time()
 
-    return mapping_iter_time_sum, mapping_iter_time_count, mapping_end_time - mapping_start_time, 1, loss
+    return mapping_iter_time_sum, mapping_iter_time_count, mapping_end_time - mapping_start_time, 1, loss.cpu()
+
+
+def slam_frame(
+    config,
+    render_fn,
+    params,
+    variables,
+    #
+    time_idx,
+    color,
+    depth,
+    cam,
+    keyframe_list,
+    #
+    first_frame_w2c,
+    # gt_w2c_all_frames,
+):
+    tracking_metrics, mapping_metrics = None, None
+    # Tracking
+    with nvtx.annotate(f'tracking {time_idx}'):
+        # Initialize the camera pose for the current frame
+        initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
+        tracking_optimizer = initialize_optimizer(
+            params, # {k: v for k, v in params.items() if k in ['cam_unnorm_rots', 'cam_trans']},
+            config['tracking']['lrs']
+        )
+        tracking_metrics = track_frame(
+            config,
+            render_fn,
+            params,
+            tracking_optimizer,
+            time_idx,
+            color[:, ::config['tracking_factor'], ::config['tracking_factor']],
+            depth[:, ::config['tracking_factor'], ::config['tracking_factor']],
+            cam,
+            first_frame_w2c,
+            # gt_w2c_all_frames,
+        )
+    
+    # Densification & KeyFrame-based Mapping
+    if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
+        # Densification
+        if config['mapping']['add_new_gaussians'] and time_idx > 0:
+            with nvtx.annotate(f'densification {time_idx}'):
+                densify_frame(
+                    config,
+                    render_fn,
+                    params,
+                    time_idx,
+                    color[:, ::config['densify_factor'], ::config['densify_factor']],
+                    depth[:, ::config['densify_factor'], ::config['densify_factor']],
+                    cam,
+                    first_frame_w2c,
+                    # gt_w2c_all_frames,
+                )
+        
+        with nvtx.annotate(f'mapping {time_idx}'):
+            mapping_optimizer = initialize_optimizer(params, config['mapping']['lrs'])
+            mapping_metrics = map_frame(
+                config,
+                render_fn,
+                params,
+                variables,
+                mapping_optimizer,
+                time_idx,
+                color[:, ::config['mapping_factor'], ::config['mapping_factor']],
+                depth[:, ::config['mapping_factor'], ::config['mapping_factor']],
+                cam,
+                first_frame_w2c,
+                # gt_w2c_all_frames,
+                keyframe_list
+            )
+    
+    # Add frame to keyframe list
+    if (
+        (time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0)
+    ):# and (not torch.isinf(gt_w2c_all_frames[-1]).any()) and (not torch.isnan(gt_w2c_all_frames[-1]).any()):
+        with torch.no_grad():
+            # Get the current estimated rotation & translation
+            curr_w2c = build_transform(
+                params['cam_trans'][time_idx].detach(),
+                params['cam_unnorm_rots'][time_idx].detach()
+            )
+            # Initialize Keyframe Info
+            curr_keyframe = {
+                'id': time_idx,
+                'est_w2c': curr_w2c,
+                'color': color[:, ::config['mapping_factor'], ::config['mapping_factor']],
+                'depth': depth[:, ::config['mapping_factor'], ::config['mapping_factor']]
+            }
+            # Add to keyframe list
+            keyframe_list.append(curr_keyframe)
+    
+    return tracking_metrics, mapping_metrics
 
 
 def rgbd_slam(config: dict):
@@ -337,23 +442,19 @@ def rgbd_slam(config: dict):
         num_frames = len(dataset)
 
     # Initialize Parameters & Canoncial Camera parameters
+    color, depth, intrinsics, pose = dataset[0]
     params, variables, first_frame_w2c, cam = initialize_first_timestep(
-        dataset,
+        # dataset,
+        color.permute(2, 0, 1) / 255, # (H, W, C) -> (C, H, W)
+        depth.permute(2, 0, 1), # (H, W, C) -> (C, H, W)
+        intrinsics[:3, :3],
+        torch.linalg.inv(pose),
         num_frames, 
         config['scene_radius_depth_ratio'],
+        config['densify_factor'],
         config['mean_sq_dist_method'],
-        config['densify_factor'],
-        config['gaussian_distribution']
+        config['gaussian_distribution'],
     )
-    tracking_cam, densify_cam, mapping_cam = [Camera(
-        cam.Ks / factor,
-        cam.width // factor,
-        cam.height // factor,
-    ) for factor in [
-        config['tracking_factor'],
-        config['densify_factor'],
-        config['mapping_factor']
-    ]]
     
     # Initialize list to keep track of Keyframes
     keyframe_list = []
@@ -379,13 +480,56 @@ def rgbd_slam(config: dict):
         num_workers=1,
     )
     dataloader_iter = dataloader.__iter__()
-    prev_tracking_loss = torch.zeros(1).to('cpu')
-    prev_mapping_loss = torch.zeros(1).to('cpu')
+    tracking_loss = torch.zeros(1).to('cpu')
+    mapping_loss = torch.zeros(1).to('cpu')
+
+    if config.viewer:
+        @torch.no_grad()
+        def viewer_render_fn(camera_state: nerfview.CameraState, img_wh: Tuple[int, int]):
+            """Callable function for the viewer."""
+            W, H = img_wh
+            c2w = camera_state.c2w
+            K = camera_state.get_K(img_wh)
+            c2w = torch.from_numpy(c2w).float().to('cuda')
+            K = torch.from_numpy(K).float().to('cuda')
+            
+            if params['log_scales'].shape[1] == 1:
+                log_scales = torch.tile(params['log_scales'], (1, 3))
+            else:
+                log_scales = params['log_scales']
+            rendervar = {
+                'means': params['means3D'],
+                'quats': F.normalize(params['unnorm_rotations']),
+                'scales': torch.exp(log_scales),
+                'opacities': torch.sigmoid(params['logit_opacities'][:, 0]),
+                'colors': params['rgb_colors'],
+                'viewmats': torch.linalg.inv(c2w)[None],
+            }
+            renders, silhouette, info = rasterization(
+                **rendervar,
+                render_mode='RGB',
+                Ks=K[None],  # [C, 3, 3]
+                width=W,
+                height=H,
+                eps2d=0,
+                packed=True,
+                sh_degree=None,
+            )
+            return renders[0].cpu().numpy()
+        
+        server = viser.ViserServer(port=8080, verbose=False)
+        viewer = nerfview.Viewer(
+            server=server,
+            render_fn=viewer_render_fn,
+            mode="training",
+        )
 
     # Iterate over Scan
-    mapping_optimizer = initialize_optimizer(params, config['mapping']['lrs'])
     time_idx_tqdm = tqdm(list(range(checkpoint_time_idx, num_frames)))
     for time_idx in time_idx_tqdm:
+        if config.viewer:
+            viewer.lock.acquire()
+            tic = time.time()
         # Load RGBD frames incrementally instead of all frames
         with nvtx.annotate('dataset[time_idx]'):
             color, depth, _, gt_pose = next(dataloader_iter)
@@ -394,103 +538,57 @@ def rgbd_slam(config: dict):
             gt_pose = gt_pose[0].to(device)
         # Process poses
         gt_w2c = torch.linalg.inv(gt_pose)
+        gt_w2c_all_frames.append(gt_w2c)
         # Process RGB-D Data
         color = color.permute(2, 0, 1) / 255
         depth = depth.permute(2, 0, 1)
-        gt_w2c_all_frames.append(gt_w2c)
-
+            
         time_idx_tqdm.set_postfix_str(
             f'num_gaussians: {params['means3D'].shape[0]}'
-            f' | tracking_loss: {prev_tracking_loss.item():.4f}'
-            f' | mapping_loss: {prev_mapping_loss.item():.4f}'
+            f' | tracking_loss: {tracking_loss.item():.4f}'
+            f' | mapping_loss: {mapping_loss.item():.4f}'
         )
 
-        # Tracking
-        with nvtx.annotate(f'tracking {time_idx}'):
-            # Initialize the camera pose for the current frame
-            params = initialize_camera_pose(params, time_idx, forward_prop=config['tracking']['forward_prop'])
-            tracking_optimizer = initialize_optimizer(
-                params, # {k: v for k, v in params.items() if k in ['cam_unnorm_rots', 'cam_trans']},
-                config['tracking']['lrs']
+        tracking_metrics, mapping_metrics = slam_frame(
+            config,
+            render_fn,
+            params,
+            variables,
+            #
+            time_idx,
+            color,
+            depth,
+            cam,
+            keyframe_list,
+            #
+            first_frame_w2c,
+        )
+
+        if tracking_metrics is not None:
+            tracking_iter_time_sum += tracking_metrics[0]
+            tracking_iter_time_count += tracking_metrics[1]
+            tracking_frame_time_sum += tracking_metrics[2]
+            tracking_frame_time_count += tracking_metrics[3]
+            tracking_loss = tracking_metrics[4].cpu()
+        
+        if mapping_metrics is not None:
+            mapping_iter_time_sum += mapping_metrics[0]
+            mapping_iter_time_count += mapping_metrics[1]
+            mapping_frame_time_sum += mapping_metrics[2]
+            mapping_frame_time_count += mapping_metrics[3]
+            mapping_loss = mapping_metrics[4].cpu()
+
+        if config.viewer:
+            viewer.lock.release()
+            num_train_rays_per_step = cam.height * cam.width
+            num_train_steps_per_sec = 1.0 / (time.time() - tic)
+            num_train_rays_per_sec = (
+                num_train_rays_per_step * num_train_steps_per_sec
             )
-            metrics = track_frame(
-                config,
-                render_fn,
-                params,
-                tracking_optimizer,
-                time_idx,
-                color,
-                depth,
-                tracking_cam,
-                first_frame_w2c,
-                gt_w2c_all_frames,
-            )
-            tracking_iter_time_sum += metrics[0]
-            tracking_iter_time_count += metrics[1]
-            tracking_frame_time_sum += metrics[2]
-            tracking_frame_time_count += metrics[3]
-            prev_tracking_loss = metrics[4].cpu()
-        
-        # Densification & KeyFrame-based Mapping
-        if time_idx == 0 or (time_idx+1) % config['map_every'] == 0:
-            # Densification
-            if config['mapping']['add_new_gaussians'] and time_idx > 0:
-                with nvtx.annotate(f'densification {time_idx}'):
-                    params, mapping_optimizer = densify_frame(
-                        config,
-                        render_fn,
-                        params,
-                        mapping_optimizer,
-                        time_idx,
-                        color,
-                        depth,
-                        densify_cam,
-                        first_frame_w2c,
-                        gt_w2c_all_frames,
-                    )
-            
-            with nvtx.annotate(f'mapping {time_idx}'):
-                mapping_optimizer = initialize_optimizer(params, config['mapping']['lrs'])
-                metrics = map_frame(
-                    config,
-                    render_fn,
-                    params,
-                    variables,
-                    mapping_optimizer,
-                    time_idx,
-                    color,
-                    depth,
-                    mapping_cam,
-                    first_frame_w2c,
-                    gt_w2c_all_frames,
-                    keyframe_list
-                )
-                mapping_iter_time_sum += metrics[0]
-                mapping_iter_time_count += metrics[1]
-                mapping_frame_time_sum += metrics[2]
-                mapping_frame_time_count += metrics[3]
-                prev_mapping_loss = metrics[4].cpu()
-        
-        # Add frame to keyframe list
-        if ((time_idx == 0) or ((time_idx+1) % config['keyframe_every'] == 0) or \
-                    (time_idx == num_frames-2)) and (not torch.isinf(gt_w2c_all_frames[-1]).any()) and (not torch.isnan(gt_w2c_all_frames[-1]).any()):
-            with torch.no_grad():
-                # Get the current estimated rotation & translation
-                curr_w2c = build_transform(
-                    params['cam_trans'][time_idx].detach(),
-                    params['cam_unnorm_rots'][time_idx].detach()
-                )
-                # Initialize Keyframe Info
-                curr_keyframe = {'id': time_idx, 'est_w2c': curr_w2c, 'color': color, 'depth': depth}
-                # Add to keyframe list
-                keyframe_list.append(curr_keyframe)
-                keyframe_time_indices.append(time_idx)
-        
-        # Checkpoint every iteration
-        if time_idx % config['checkpoint_interval'] == 0 and config['save_checkpoints']:
-            ckpt_output_dir = os.path.join(config['workdir'], config['run_name'])
-            save_params_ckpt(params, ckpt_output_dir, time_idx)
-            np.save(os.path.join(ckpt_output_dir, f'keyframe_time_indices{time_idx}.npy'), np.array(keyframe_time_indices))
+            # Update the viewer state.
+            viewer.state.num_train_rays_per_sec = num_train_rays_per_sec
+            # Update the scene.
+            viewer.update(time_idx, num_train_rays_per_step)
 
     # Compute Average Runtimes
     if tracking_iter_time_count == 0:
@@ -530,3 +628,4 @@ def rgbd_slam(config: dict):
     
     # Save Parameters
     save_params(params, output_dir)
+

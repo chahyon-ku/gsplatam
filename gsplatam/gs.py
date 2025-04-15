@@ -25,7 +25,6 @@ def remove_points(to_remove, params, optimizer):
         else:
             group["params"][0] = torch.nn.Parameter(group["params"][0][to_keep].requires_grad_(True))
             params[k] = group["params"][0]
-    return params
 
 
 @nvtx.annotate("prune_gaussians")
@@ -42,14 +41,12 @@ def prune_gaussians(params, variables, optimizer, iter, prune_dict):
             if iter >= prune_dict['remove_big_after']:
                 big_points_ws = torch.exp(params['log_scales']).max(dim=1).values > 0.1 * variables['scene_radius']
                 to_remove = torch.logical_or(to_remove, big_points_ws)
-            params = remove_points(to_remove, params, optimizer)
+            remove_points(to_remove, params, optimizer)
         
         # Reset Opacities for all Gaussians
         if iter > 0 and iter % prune_dict['reset_opacities_every'] == 0 and prune_dict['reset_opacities']:
             new_params = {'logit_opacities': inverse_sigmoid(torch.ones_like(params['logit_opacities']) * 0.01)}
-            params = update_params_and_optimizer(new_params, params, optimizer)
-    
-    return params
+            update_params_and_optimizer(new_params, params, optimizer)
 
 
 def keyframe_selection_overlap(gt_depth, w2c, intrinsics, keyframe_list, k, pixels=1600):
@@ -163,7 +160,7 @@ def initialize_new_params(new_pt_cld, mean3_sq_dist, gaussian_distribution):
 
 # torch.compiler.allow_in_graph(fused_ssim)
 @nvtx.annotate('compute_loss')
-@torch.compile
+# @torch.compile
 def compute_loss(
     im, silhouette, depth, curr_data,
     loss_weights, use_sil_for_loss,

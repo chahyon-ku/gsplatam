@@ -1,11 +1,24 @@
 import asyncio
 import time
+from typing import Tuple
 import aiohttp
 import cv2
+from gsplat.rendering import rasterization
+import hydra
+import nerfview
 import numpy as np
 from aiortc import RTCPeerConnection, RTCSessionDescription, VideoStreamTrack
 from aiortc.contrib.media import MediaBlackhole
+from omegaconf import DictConfig, OmegaConf
 import open3d as o3d
+import torch
+import viser
+import torch.nn.functional as F
+
+from gsplatam.renderer import Camera
+from gsplatam.slam import initialize_first_timestep, slam_frame
+
+OmegaConf.register_new_resolver("eval", eval, replace=True)
 
 
 class SignalingServer:
@@ -35,7 +48,7 @@ class SignalingServer:
             except Exception as e:
                 print('Error while sending the answer:', e)
 
-async def start_receiving_stream(server_url):
+async def start_receiving_stream(config, server_url):
     signaling_server = SignalingServer(server_url)
     peer_connection = RTCPeerConnection()
 
@@ -50,7 +63,7 @@ async def start_receiving_stream(server_url):
         print("Received new track")
         if track.kind == "video":
             try:
-                asyncio.ensure_future(display_video(track))
+                asyncio.ensure_future(display_video(config, track))
             except Exception as e:
                 print('Error while displaying video:', e)
         else:
@@ -100,49 +113,142 @@ def depth_to_points(
     return points
 
 
-async def display_video(track: VideoStreamTrack):
+async def display_video(config, track: VideoStreamTrack):
     print("Starting video display...")
-    orig_K = np.array([
+    orig_Ks = torch.from_numpy(np.array([[
         [1596.9842529296875, 0, 717.5390625],
         [0, 1596.9842529296875, 956.87127685546875],
         [0, 0, 1]
-    ])
+    ]])).cuda().float()
     orig_W, orig_H = 1440, 1920
+    first_frame = True
+    render_fn = hydra.utils.instantiate(config.render_fn)
+    time_idx = 0
+    config['tracking_factor'] = 1
+    config['densify_factor'] = 1
+    config['mapping_factor'] = 1
 
-    while True:
+    # while True:
+    for time_idx in range(100_000):
         curr = time.time()
-        frame = await track.recv()
+        try:
+            frame = await track.recv()
+        except Exception as e:
+            print('Error while receiving frame:', e)
+            break
         img_bgr = frame.to_ndarray(format="bgr24")  # Convert frame to BGR image
         H, W, C = img_bgr.shape
         W = W // 2
         depth_bgr, color_bgr = img_bgr[:, :W], img_bgr[:, W:]
-        depth = cv2.cvtColor(depth_bgr, cv2.COLOR_BGR2HSV)[:, :, 0]
-        mask = (0 < depth) & (depth < 179)
+        color = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2RGB)
+        depth = cv2.cvtColor(depth_bgr, cv2.COLOR_BGR2HSV)[:, :, [0]]
         depth = depth / 179 * 3.0
-        down_factor = orig_W // W
-        print('depth', depth.min(), depth.max())
+        down_factor = orig_W / W
+        print(color.shape, depth.shape)
 
-        # display pointcloud in open3d
-        points = depth_to_points(depth, 1, orig_K / down_factor, np.eye(4))
-        print(points.shape, color_bgr.shape, mask.shape)
-        points = points[mask]
-        colors = color_bgr[mask]
-        colors = colors[:, ::-1] / 255
-        print(points.shape, colors.shape, mask.shape)
-        pcd = o3d.geometry.PointCloud()
-        pcd.points = o3d.utility.Vector3dVector(points)
-        pcd.colors = o3d.utility.Vector3dVector(colors)
-        o3d.visualization.draw_geometries([pcd])
+        color = torch.from_numpy(color).cuda().float().permute(2, 0, 1) / 255.0
+        depth = torch.from_numpy(depth).cuda().float().permute(2, 0, 1)
+        intrinsics = orig_Ks[0].cuda().float() / down_factor
 
-        print(f'{time.time() - curr:.2f} {img_bgr.shape} {down_factor}')
-        cv2.imshow("WebRTC Stream", img_bgr)
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
-    cv2.destroyAllWindows()
+        if first_frame:
+            params, variables, first_frame_w2c, cam = initialize_first_timestep(
+                # dataset,
+                color, # (C, H, W)
+                depth, # (C, H, W)
+                intrinsics,
+                torch.eye(4, dtype=torch.float32, device='cuda'),
+                2000,
+                config['scene_radius_depth_ratio'],
+                config['densify_factor'],
+                config['mean_sq_dist_method'],
+                config['gaussian_distribution'],
+            )
+
+            # Initialize list to keep track of Keyframes
+            keyframe_list = []
+
+            @torch.no_grad()
+            def viewer_render_fn(camera_state: nerfview.CameraState, img_wh: Tuple[int, int]):
+                """Callable function for the viewer."""
+                W, H = img_wh
+                c2w = camera_state.c2w
+                K = camera_state.get_K(img_wh)
+                c2w = torch.from_numpy(c2w).float().to('cuda')
+                K = torch.from_numpy(K).float().to('cuda')
+                
+                if params['log_scales'].shape[1] == 1:
+                    log_scales = torch.tile(params['log_scales'], (1, 3))
+                else:
+                    log_scales = params['log_scales']
+                rendervar = {
+                    'means': params['means3D'],
+                    'quats': F.normalize(params['unnorm_rotations']),
+                    'scales': torch.exp(log_scales),
+                    'opacities': torch.sigmoid(params['logit_opacities'][:, 0]),
+                    'colors': params['rgb_colors'],
+                    'viewmats': torch.linalg.inv(c2w)[None],
+                }
+                renders, silhouette, info = rasterization(
+                    **rendervar,
+                    render_mode='RGB',
+                    Ks=K[None],  # [C, 3, 3]
+                    width=W,
+                    height=H,
+                    eps2d=0,
+                    packed=True,
+                    sh_degree=None,
+                )
+                return renders[0].cpu().numpy()
+            
+            server = viser.ViserServer(port=8080, verbose=False)
+            viewer = nerfview.Viewer(
+                server=server,
+                render_fn=viewer_render_fn,
+                mode="training",
+            )
+            first_frame = False
+
+        cam = Camera(
+            orig_Ks * H / orig_H,
+            W,
+            H,
+        )
+        viewer.lock.acquire()
+        tic = time.time()
+        tracking_metrics, mapping_metrics = slam_frame(
+            config,
+            render_fn,
+            params,
+            variables,
+            time_idx,
+            color,
+            depth,
+            cam,
+            keyframe_list,
+            first_frame_w2c,
+        )
+        # cv2.imshow("WebRTC Stream", img_bgr)
+        # if cv2.waitKey(1) & 0xFF == ord('q'):
+        #     break
+        viewer.lock.release()
+        num_train_rays_per_step = cam.height * cam.width
+        num_train_steps_per_sec = 1.0 / (time.time() - tic)
+        num_train_rays_per_sec = (
+            num_train_rays_per_step * num_train_steps_per_sec
+        )
+        # Update the viewer state.
+        viewer.state.num_train_rays_per_sec = num_train_rays_per_sec
+        # Update the scene.
+        viewer.update(time_idx, num_train_rays_per_step)
 
 
-if __name__ == "__main__":
+@hydra.main(version_base=None, config_path='../configs', config_name='demo')
+def main(config: DictConfig):
     remote_address = 'http://10.42.0.87'
 
     print("Connecting to:", remote_address)
-    asyncio.run(start_receiving_stream(remote_address))
+    asyncio.run(start_receiving_stream(config, remote_address))
+
+
+if __name__ == "__main__":
+    main()
