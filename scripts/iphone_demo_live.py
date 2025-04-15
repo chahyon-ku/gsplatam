@@ -31,15 +31,13 @@ from SplaTAM.datasets.gradslam_datasets.geometryutils import relative_transforma
 from SplaTAM.utils.common_utils import seed_everything, save_params_ckpt, save_params
 from SplaTAM.utils.eval_helpers import report_progress
 from SplaTAM.utils.keyframe_selection import keyframe_selection_overlap
-from SplaTAM.utils.recon_helpers import setup_camera
-#from jaxsplatam.gsplat_renderer import setup_camera
-from SplaTAM.utils.slam_external import build_rotation, prune_gaussians, densify
+from SplaTAM.utils.slam_external import build_rotation, densify
 from SplaTAM.utils.slam_helpers import matrix_to_quaternion
-from SplaTAM.scripts.splatam import get_loss, initialize_optimizer, initialize_params, initialize_camera_pose, get_pointcloud, add_new_gaussians
-#from jaxsplatam.gsplat_splatam import get_loss, initialize_optimizer, initialize_params, initialize_camera_pose, get_pointcloud, add_new_gaussians
+from SplaTAM.scripts.splatam import add_new_gaussians
 
-from diff_gaussian_rasterization import GaussianRasterizer as Renderer
-#from jaxsplatam.gsplat_renderer import GsplatRenderer as Renderer
+from gsplatam.gs import prune_gaussians
+from gsplatam.slam import get_loss, initialize_optimizer, initialize_params, initialize_camera_pose, get_pointcloud
+from gsplatam.renderer import setup_camera, get_render_fn, Camera
 
 import cyclonedds.idl as idl
 import cyclonedds.idl.annotations as annotate
@@ -55,7 +53,7 @@ from cyclonedds.util import duration
 import torch._dynamo
 torch._dynamo.config.suppress_errors = True
 
-
+render_fn = get_render_fn('gsplat')
 vis = None
 
 def parse_args():
@@ -158,6 +156,7 @@ def dataset_capture_loop(reader: DataReader, save_path: Path, overwrite: bool, n
         ]
     ).float()
     variables = {}
+    variables['timestep'] = torch.empty(0, device='cuda')
 
     # Start DDS Loop
     while True:
@@ -251,7 +250,7 @@ def dataset_capture_loop(reader: DataReader, save_path: Path, overwrite: bool, n
                 intrinsics = intrinsics / config['data']['downscale_factor']
                 intrinsics[2, 2] = 1.0
                 first_frame_w2c = torch.eye(4).cuda().float()
-                cam = setup_camera(color.shape[2], color.shape[1], intrinsics.cpu().numpy(), first_frame_w2c.cpu().numpy())
+                cam = Camera(intrinsics[None], color.shape[2], color.shape[1])
 
             # Initialize Densification Resolution Data
             densify_color = cv2.resize(image, dsize=(
@@ -277,7 +276,7 @@ def dataset_capture_loop(reader: DataReader, save_path: Path, overwrite: bool, n
                 init_pt_cld, mean3_sq_dist = get_pointcloud(densify_color, densify_depth, densify_intrinsics, first_frame_w2c,
                                                             mask=mask, compute_mean_sq_dist=True,
                                                             mean_sq_dist_method=config['mean_sq_dist_method'])
-                params, variables = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, config['gaussian_distribution'])
+                params = initialize_params(init_pt_cld, num_frames, mean3_sq_dist, config['gaussian_distribution'])
                 variables['scene_radius'] = torch.max(densify_depth)/config['scene_radius_depth_ratio']
 
             # Initialize Mapping & Tracking for current frame
@@ -298,10 +297,10 @@ def dataset_capture_loop(reader: DataReader, save_path: Path, overwrite: bool, n
             tracking_start_time = time.time()
             if time_idx > 0 and not config['tracking']['use_gt_poses']:
                 # Reset Optimizer & Learning Rates for tracking
-                optimizer = initialize_optimizer(params, config['tracking']['lrs'], tracking=True)
+                optimizer = initialize_optimizer(params, config['tracking']['lrs'])
                 # Keep Track of Best Candidate Rotation & Translation
-                candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
-                candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
+                candidate_cam_unnorm_rot = params['cam_unnorm_rots'][time_idx].detach().clone().reshape(1, -1)
+                candidate_cam_tran = params['cam_trans'][time_idx].detach().clone()
                 current_min_loss = float(1e20)
                 # Tracking Optimization
                 iter = 0
@@ -311,11 +310,10 @@ def dataset_capture_loop(reader: DataReader, save_path: Path, overwrite: bool, n
                 while True:
                     iter_start_time = time.time()
                     # Loss for current frame
-                    loss, variables, losses = get_loss(params, tracking_curr_data, variables, iter_time_idx, config['tracking']['loss_weights'],
-                                                       config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
-                                                       config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True,
-                                                       visualize_tracking_loss=config['tracking']['visualize_tracking_loss'],
-                                                       tracking_iteration=iter)
+                    loss, losses = get_loss(render_fn, params, tracking_curr_data, iter_time_idx, config['tracking']['loss_weights'],
+                                            config['tracking']['use_sil_for_loss'], config['tracking']['sil_thres'],
+                                            config['tracking']['use_l1'], config['tracking']['ignore_outlier_depth_loss'], tracking=True)
+
                     # Backprop
                     loss.backward()
                     # Optimizer Update
@@ -325,8 +323,8 @@ def dataset_capture_loop(reader: DataReader, save_path: Path, overwrite: bool, n
                         # Save the best candidate rotation & translation
                         if loss < current_min_loss:
                             current_min_loss = loss
-                            candidate_cam_unnorm_rot = params['cam_unnorm_rots'][..., time_idx].detach().clone()
-                            candidate_cam_tran = params['cam_trans'][..., time_idx].detach().clone()
+                            candidate_cam_unnorm_rot = params['cam_unnorm_rots'][time_idx].detach().clone().reshape(1, -1)
+                            candidate_cam_tran = params['cam_trans'][time_idx].detach().clone()
                         # Report Progress
                         if config['report_iter_progress']:
                             report_progress(params, tracking_curr_data, iter+1, progress_bar, iter_time_idx, sil_thres=config['tracking']['sil_thres'], tracking=True)
@@ -351,8 +349,8 @@ def dataset_capture_loop(reader: DataReader, save_path: Path, overwrite: bool, n
                 progress_bar.close()
                 # Copy over the best candidate rotation & translation
                 with torch.no_grad():
-                    params['cam_unnorm_rots'][..., time_idx] = candidate_cam_unnorm_rot
-                    params['cam_trans'][..., time_idx] = candidate_cam_tran
+                    params['cam_unnorm_rots'][time_idx] = candidate_cam_unnorm_rot
+                    params['cam_trans'][time_idx] = candidate_cam_tran
             elif time_idx > 0 and config['tracking']['use_gt_poses']:
                 with torch.no_grad():
                     # Get the ground truth pose relative to frame 0
@@ -361,8 +359,8 @@ def dataset_capture_loop(reader: DataReader, save_path: Path, overwrite: bool, n
                     rel_w2c_rot_quat = matrix_to_quaternion(rel_w2c_rot)
                     rel_w2c_tran = rel_w2c[:3, 3].detach()
                     # Update the camera parameters
-                    params['cam_unnorm_rots'][..., time_idx] = rel_w2c_rot_quat
-                    params['cam_trans'][..., time_idx] = rel_w2c_tran
+                    params['cam_unnorm_rots'][time_idx] = rel_w2c_rot_quat.reshape(1, -1)
+                    params['cam_trans'][time_idx] = rel_w2c_tran
             # Update the runtime numbers
             tracking_end_time = time.time()
             tracking_frame_time_sum += tracking_end_time - tracking_start_time
@@ -389,14 +387,17 @@ def dataset_capture_loop(reader: DataReader, save_path: Path, overwrite: bool, n
                                          'intrinsics': densify_intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': curr_gt_w2c}
 
                     # Add new Gaussians to the scene based on the Silhouette
+                    params['cam_unnorm_rots'] = params['cam_unnorm_rots'].t().unsqueeze(0).detach().clone().requires_grad_(True)
+                    params['cam_trans'] = params['cam_trans'].t().unsqueeze(0).detach().clone().requires_grad_(True)
                     params, variables = add_new_gaussians(params, variables, densify_curr_data,
                                                           config['mapping']['sil_thres'], time_idx,
                                                           config['mean_sq_dist_method'], config['gaussian_distribution'])
-
+                    params['cam_unnorm_rots'] = params['cam_unnorm_rots'].squeeze(0).t().detach().clone().requires_grad_(True)
+                    params['cam_trans'] = params['cam_trans'].squeeze(0).t().detach().clone().requires_grad_(True)
                 with torch.no_grad():
                     # Get the current estimated rotation & translation
-                    curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
-                    curr_cam_tran = params['cam_trans'][..., time_idx].detach()
+                    curr_cam_rot = F.normalize(params['cam_unnorm_rots'][time_idx].detach().reshape(1, -1))
+                    curr_cam_tran = params['cam_trans'][time_idx].detach()
                     curr_w2c = torch.eye(4).cuda().float()
                     curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
                     curr_w2c[:3, 3] = curr_cam_tran
@@ -415,7 +416,7 @@ def dataset_capture_loop(reader: DataReader, save_path: Path, overwrite: bool, n
                     print(f"\nSelected Keyframes at Frame {time_idx}: {selected_time_idx}")
 
                 # Reset Optimizer & Learning Rates for Full Map Optimization
-                optimizer = initialize_optimizer(params, config['mapping']['lrs'], tracking=False)
+                optimizer = initialize_optimizer(params, config['mapping']['lrs'])
 
                 # Mapping
                 mapping_start_time = time.time()
@@ -440,15 +441,16 @@ def dataset_capture_loop(reader: DataReader, save_path: Path, overwrite: bool, n
                     iter_data = {'cam': cam, 'im': iter_color, 'depth': iter_depth, 'id': iter_time_idx,
                                  'intrinsics': intrinsics, 'w2c': first_frame_w2c, 'iter_gt_w2c_list': iter_gt_w2c}
                     # Loss for current frame
-                    loss, variables, losses = get_loss(params, iter_data, variables, iter_time_idx, config['mapping']['loss_weights'],
-                                                       config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
-                                                       config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True)
+                    loss, losses = get_loss(render_fn, params, iter_data, iter_time_idx, config['mapping']['loss_weights'],
+                                            config['mapping']['use_sil_for_loss'], config['mapping']['sil_thres'],
+                                            config['mapping']['use_l1'], config['mapping']['ignore_outlier_depth_loss'], mapping=True)
+
                     # Backprop
                     loss.backward()
                     with torch.no_grad():
                         # Prune Gaussians
                         if config['mapping']['prune_gaussians']:
-                            params, variables = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
+                            params = prune_gaussians(params, variables, optimizer, iter, config['mapping']['pruning_dict'])
                         # Gaussian-Splatting's Gradient-based Densification
                         if config['mapping']['use_gaussian_splatting_densification']:
                             params, variables = densify(params, variables, optimizer, iter, config['mapping']['densify_dict'])
@@ -491,8 +493,8 @@ def dataset_capture_loop(reader: DataReader, save_path: Path, overwrite: bool, n
                 (time_idx == num_frames-2)) and (not torch.isinf(curr_gt_w2c[-1]).any()) and (not torch.isnan(curr_gt_w2c[-1]).any()):
                 with torch.no_grad():
                     # Get the current estimated rotation & translation
-                    curr_cam_rot = F.normalize(params['cam_unnorm_rots'][..., time_idx].detach())
-                    curr_cam_tran = params['cam_trans'][..., time_idx].detach()
+                    curr_cam_rot = F.normalize(params['cam_unnorm_rots'][time_idx].detach().reshape(1, -1))
+                    curr_cam_tran = params['cam_trans'][time_idx].detach()
                     curr_w2c = torch.eye(4).cuda().float()
                     curr_w2c[:3, :3] = build_rotation(curr_cam_rot)
                     curr_w2c[:3, 3] = curr_cam_tran
@@ -531,7 +533,7 @@ def dataset_capture_loop(reader: DataReader, save_path: Path, overwrite: bool, n
             # Run live visualizer
             if total_frames == 0 and experiment.config["live_recon"]:
                 print("Starting live visualizer...")
-                vis = subprocess.Popen(["python", "./viz_scripts/live_recon.py", args.config])
+                vis = subprocess.Popen(["python", "./scripts/live_recon.py", args.config])
             # Update frame count
             total_frames += 1
             time_idx = total_frames

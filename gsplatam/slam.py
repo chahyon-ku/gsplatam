@@ -400,7 +400,7 @@ def rgbd_slam(config: dict):
         gt_w2c_all_frames.append(gt_w2c)
 
         time_idx_tqdm.set_postfix_str(
-            f'num_gaussians: {params['means3D'].shape[0]}'
+            f'num_gaussians: {params["means3D"].shape[0]}'
             f' | tracking_loss: {prev_tracking_loss.item():.4f}'
             f' | mapping_loss: {prev_mapping_loss.item():.4f}'
         )
