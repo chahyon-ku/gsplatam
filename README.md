@@ -1,18 +1,9 @@
-## Todo
+# gsplatam: Real-time Splat, Track, and Map with gsplat
 
-* Generate current logs/profiles (done)
-* Compare not packed vs. packed (done): packed is faster when there are more gaussians contrary to documentation
-* Hydra configs (done)
-* Single-step multi-view mapping
-* sgd / visible adam / persistent adam
-    * separate out tracking and mapping optimizers
-* Isometric CUDA kernels (dropped): conics are non-diagonal anyway
-* Taming-cached CUDA kernels (dropped): high risk low return
-* Entropy-based keyframe selection based on Joey Wilson's paper
-* MCMC densfication
-* 2DGS
+This project replaces the gaussian splatting backbone of [SplaTAM](https://github.com/spla-tam/SplaTAM) with [gsplat](https://github.com/nerfstudio-project/gsplat)
+and provide [viser](https://github.com/nerfstudio-project/viser) visualization with RGBD streams from an iPhone using either the [Record3D app](https://record3d.app/) or the [NerfCapture app](https://github.com/jc211/NeRFCapture).
 
-## Environment
+## Environment Setup 
 ```bash
 git submodule update --init --recursive
 mamba create -n gsplatam -c pytorch -c nvidia\
@@ -27,14 +18,16 @@ mamba create -n gsplatam -c pytorch -c nvidia\
 mamba activate gsplatam
 pip install --no-deps\
     open3d\
-    gsplat==1.4\
     viser==0.02\
     nerfview
 pip install --no-deps -e\
     ./third_party/splatam\
-    ./third_party/splatam/SplaTAM/diff-gaussian-rasterization-w-depth.git
+    ./third_party/splatam/SplaTAM/diff-gaussian-rasterization-w-depth.git\
     ./third_party/fused-ssim\
+    ./third_party/gsplat\
     .
+# link error -lcuda
+export LIBRARY_PATH="$CONDA_PREFIX/lib/stubs:$LIBRARY_PATH"
 ```
 
 ## Download Data
@@ -43,26 +36,26 @@ bash third_party/splatam/SplaTAM/bash_scripts/download_replica.sh
 bash third_party/splatam/SplaTAM/bash_scripts/download_tum.sh
 ```
 
-## Evaluate
+## Visualization
+
+### Offline Dataset
 ```bash
-# link error -lcuda
-export LIBRARY_PATH="$CONDA_PREFIX/lib/stubs:$LIBRARY_PATH"
-
-bash scripts/train_all.sh
-
-backend=gsplat
-size=tiny
-data=replica
-nsys profile --wait primary -o $backend\_$size-$data --force-overwrite true\
-    python scripts/train.py\
-    backend=$backend\
-    data@_global_=$data\
-    size@_global_=$size\
-    2>&1 | tee $backend\_$size-$data\.log
+python scripts/train.py size@_global_=tiny data@_global_=replica viewer=True
+python scripts/train.py size@_global_=base data@_global_=tum viewer=True
 ```
 
-## Demo
+### iPhone - Record3D
 ```bash
+python scripts/demo_record3d.py
+```
 
+### iPhone - NerfCapture
+```bash
 python scripts/iphone_demo_live.py
+```
+
+## Evaluate
+```bash
+bash scripts/train_orig.sh
+bash scripts/train_ours.sh
 ```
