@@ -17,7 +17,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import open3d as o3d
 
-# from jaxsplatam.gsplat_renderer import GsplatRenderer as Renderer
 from diff_gaussian_rasterization import GaussianRasterizer as Renderer
 from diff_gaussian_rasterization import GaussianRasterizationSettings as Camera
 
@@ -42,7 +41,7 @@ def tk_thread():
 
     lbl = tk.Label(
         root,
-        text="JAXSplaTAM Visualizer\n\nW/S/A/D/Q/E for camera translation\nMouse for camera pan and zoom\nEsc to quit",
+        text="gSplaTAM Visualizer\n\nW/S/A/D/Q/E for camera translation\nMouse for camera pan and zoom\nEsc to quit",
         fg="white",       # text color
         bg="black",       # label background color
         font=("Arial", 15)  # ("FontFamily", font_size)
@@ -120,10 +119,10 @@ def load_scene_data(scene_path, first_frame_w2c, intrinsics):
             params[k] = all_params[k].cuda().float()
 
     all_w2cs = []
-    num_t = params['cam_unnorm_rots'].shape[-1]
+    num_t = params['cam_unnorm_rots'].shape[0]
     for t_i in range(num_t):
-        cam_rot = F.normalize(params['cam_unnorm_rots'][..., t_i])
-        cam_tran = params['cam_trans'][..., t_i]
+        cam_rot = F.normalize(params['cam_unnorm_rots'][t_i].detach().reshape(1, -1))
+        cam_tran = params['cam_trans'][t_i]
         rel_w2c = torch.eye(4).cuda().float()
         rel_w2c[:3, :3] = build_rotation(cam_rot)
         rel_w2c[:3, 3] = cam_tran
